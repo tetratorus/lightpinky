@@ -35,6 +35,9 @@ Remote agents: `LIGHTPINKY_TOKEN=... ./lightpinky -http 100.x.y.z:7310` serves M
 | `key` | `home`, `enter`, `delete`, … |
 | `launch` | Open an app by bundle id or name |
 | `apps` | Installed apps |
+| `stop_app` | Quit an app |
+| `open_link` | Open a URL in the app iOS would open it in |
+| `power` | Locked / screen on, optionally wake the screen |
 
 Every tool takes an optional `device` (UDID); it may be left out when one iPhone is online.
 

@@ -216,9 +216,24 @@ type keyIn struct {
 	Key string `json:"key" jsonschema:"home, enter, tab, delete, forward_delete, escape, dpad_up, dpad_down, dpad_left, dpad_right, page_up, page_down"`
 }
 
+type linkIn struct {
+	devIn
+	URL string `json:"url" jsonschema:"web link or app URL scheme"`
+}
+
 type launchIn struct {
 	devIn
 	App string `json:"app" jsonschema:"bundle id or app name"`
+}
+
+// core is the phone driven through CoreDevice (iOS 27+), which has the
+// tools beyond driver.Device.
+func core(d driver.Device) (*ios.Device, error) {
+	dev, ok := d.(*ios.Device)
+	if !ok {
+		return nil, fmt.Errorf("%s is driven through %s: %w", d.Info().Name, d.Info().Backend, driver.ErrUnsupported)
+	}
+	return dev, nil
 }
 
 func text(v any) *sdk.CallToolResult {
@@ -341,5 +356,59 @@ func (ph *phones) register(srv *sdk.Server) {
 				return fail(err), nil, nil
 			}
 			return text(apps), nil, nil
+		})
+
+	sdk.AddTool(srv, &sdk.Tool{Name: "stop_app", Description: "Quit an app by bundle id."},
+		func(ctx context.Context, _ *sdk.CallToolRequest, in launchIn) (*sdk.CallToolResult, any, error) {
+			return done(ph.with(ctx, in.Device, func(d driver.Device) error {
+				dev, err := core(d)
+				if err != nil {
+					return err
+				}
+				return dev.StopApp(ctx, in.App)
+			}))
+		})
+
+	sdk.AddTool(srv, &sdk.Tool{Name: "open_link", Description: "Open a URL in the app iOS would open it in."},
+		func(ctx context.Context, _ *sdk.CallToolRequest, in linkIn) (*sdk.CallToolResult, any, error) {
+			return done(ph.with(ctx, in.Device, func(d driver.Device) error {
+				dev, err := core(d)
+				if err != nil {
+					return err
+				}
+				app, err := dev.LinkApp(ctx, in.URL)
+				if err != nil {
+					return err
+				}
+				return dev.OpenLink(ctx, in.URL, app)
+			}))
+		})
+
+	sdk.AddTool(srv, &sdk.Tool{Name: "power", Description: "Report whether the phone is locked and its screen on; wake: true lights the screen first."},
+		func(ctx context.Context, _ *sdk.CallToolRequest, in struct {
+			devIn
+			Wake bool `json:"wake,omitempty"`
+		}) (*sdk.CallToolResult, any, error) {
+			var st struct{ Locked, ScreenOn bool }
+			err := ph.with(ctx, in.Device, func(d driver.Device) (err error) {
+				dev, err := core(d)
+				if err != nil {
+					return err
+				}
+				if in.Wake {
+					if err = dev.Wake(ctx); err != nil {
+						return err
+					}
+				}
+				if st.Locked, err = dev.Locked(ctx); err != nil {
+					return err
+				}
+				st.ScreenOn, err = dev.ScreenOn(ctx)
+				return err
+			})
+			if err != nil {
+				return fail(err), nil, nil
+			}
+			return text(st), nil, nil
 		})
 }
