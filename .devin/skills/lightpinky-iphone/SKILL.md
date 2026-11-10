@@ -5,7 +5,7 @@ description: Set up lightpinky and control a real iPhone or the iOS Simulator fr
 
 # lightpinky
 
-Use https://github.com/tetratorus/lightpinky. Clone it if needed, then follow the repository README's **Setup** instructions. The repository owns installation and troubleshooting; do not invent a separate setup.
+Use https://github.com/tetratorus/lightpinky. Clone it if needed, then follow the repository README's **Setup** instructions. If it is already cloned, update it every time before use: `git pull --ff-only`, then `python3 scripts/setup.py`. If uncommitted changes or a diverged branch block the pull, say so instead of discarding anything. The repository owns installation and troubleshooting; do not invent a separate setup.
 
 For a real iPhone, setup is not complete until remote unlock is verified. Device discovery or an already-unlocked phone does not prove this works: run `scripts/phone unlock` with the phone locked and confirm it becomes unlocked. If `IPHONE_UNLOCK_CODE` is unavailable, explicitly ask the owner to set it locally in the server's environment or `~/.zshrc` as described in the README, then retry verification once configured. Never ask for the code in chat, print it, or commit it. If verification needs the owner's help, explicitly report setup as incomplete. Never automatically repeat a passcode attempt.
 
