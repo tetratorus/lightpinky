@@ -106,6 +106,7 @@ func (p *Provider) UseOverWiFi(id string) {
 	}
 	if !p.wifi.use[id] {
 		p.wifi.use[id] = true
+		p.savePhonesLocked()
 		if _, found := p.wifi.found[id]; found {
 			p.logger().Info("iphone: the person uses the phone found on Wi-Fi", "device", id)
 		}
