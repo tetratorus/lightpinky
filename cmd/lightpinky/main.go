@@ -33,10 +33,17 @@ func main() {
 	dir := flag.String("ddi", defaultDDIDir(), "folder for the developer disk image")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	opts := &slog.HandlerOptions{}
+	if os.Getenv("LIGHTPINKY_DEBUG") != "" {
+		opts.Level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, opts))
 	p := ios.NewProvider()
 	p.Log = log
 	p.DiskImageDir = *dir
+	p.WiFiMux = *wifi
+	p.PhonesFile = phonesFile()
+	p.UseSavedPhones()
 	p.SetWiFi(*wifi)
 	ph := &phones{p: p, wifi: *wifi, open: map[string]driver.Device{}}
 	defer ph.closeAll()
@@ -72,6 +79,14 @@ func defaultDDIDir() string {
 		return ""
 	}
 	return filepath.Join(d, "lightpinky", "ddi")
+}
+
+func phonesFile() string {
+	d, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "lightpinky", "phones.json")
 }
 
 func bearer(token string, next http.Handler) http.Handler {

@@ -33,12 +33,16 @@ type Provider struct {
 	// (an iOS_DDI folder in it), looked in before Xcode's; "" for none.
 	DiskImageDir string
 
-	// WiFiMux lets the provider run a usbmuxd of its own on Linux and
-	// Windows, whose usbmuxd lists phones on Wi-Fi not at all or only while
+	// WiFiMux lets the provider run a usbmuxd of its own on Linux,
+	// Windows and macOS, whose usbmuxd lists phones on Wi-Fi not at all or only while
 	// they are on a cable too, to find phones on Wi-Fi (netmux.go). Only the
 	// app's provider sets it: it points go-ios, for the whole process, at
 	// that usbmuxd, which then carries every connection to an iPhone.
 	WiFiMux bool
+
+	// PhonesFile keeps the UDIDs of the phones the person uses over Wi-Fi
+	// (phones.go); "" for none.
+	PhonesFile string
 
 	// Log gets a line for each step Pinky takes to prepare a phone:
 	// mounting the developer disk image, showing the Developer Mode
@@ -449,6 +453,9 @@ func (p *Provider) inspect(ctx context.Context, e goios.DeviceEntry) driver.Info
 		if !isPairingError(err) {
 			info.State = driver.StateOffline
 			info.Detail = "The iPhone does not answer: " + err.Error()
+			if info.Connection == "wifi" {
+				info.Detail = p.otherNetworkDetail(info.ID) + info.Detail
+			}
 			return info
 		}
 		if info.Connection == "wifi" {

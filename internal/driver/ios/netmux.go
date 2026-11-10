@@ -2,12 +2,14 @@ package ios
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/tetratorus/lightpinky/internal/driver/ios/netmux"
@@ -170,9 +172,14 @@ func (p *Provider) serveMuxLocked(upstream string, l net.Listener, addr string) 
 // ownMuxOS reports whether Pinky looks for phones on Wi-Fi itself on this
 // system: on Linux, whose usbmuxd lists phones on a cable only, and on
 // Windows, whose Apple usbmuxd lists an iPhone on Wi-Fi only while it is
-// on a cable too (an iPhone 18 Pro Max on iOS 27.2, 2026-11-09).
+// on a cable too (an iPhone 18 Pro Max on iOS 27.2, 2026-11-09), and on
+// macOS, whose usbmuxd did not list an iPhone 16 Pro on iOS 27.2 on Wi-Fi
+// at all, on the Mac's subnet or another one: its attach failed the
+// preflight with 0xe8000084 ("This device is no longer connected"), while
+// Pinky's own mux used it (macOS 27.2.1, 2026-11-10). A phone macOS's
+// usbmuxd does list on the network goes through it as before.
 func ownMuxOS() bool {
-	return runtime.GOOS == "linux" || runtime.GOOS == "windows"
+	return runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 }
 
 // pairedUDIDs returns the phones this computer paired with: those with a
@@ -181,6 +188,9 @@ func ownMuxOS() bool {
 func (p *Provider) pairedUDIDs() []string {
 	ids := map[string]bool{}
 	for _, id := range netmux.PairedUDIDs(netmux.LockdownDir) {
+		ids[id] = true
+	}
+	for _, id := range readPhones(p.PhonesFile) {
 		ids[id] = true
 	}
 	p.mu.Lock()
@@ -204,4 +214,67 @@ func (p *Provider) pairedUDIDs() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// otherNetworkDetail says, for a phone found on Wi-Fi that does not answer,
+// when its address is on none of this computer's networks: the phone then
+// accepts lockdown's TCP connection but closes it before any answer (an
+// iPhone 16 Pro on iOS 27.2 at 10.250.0.123, the Mac at 10.68.8.121,
+// 2026-11-10), and the person should put both on the same Wi-Fi.
+func (p *Provider) otherNetworkDetail(id string) string {
+	p.nmux.mu.Lock()
+	m := p.nmux.mux
+	p.nmux.mu.Unlock()
+	if m == nil {
+		return ""
+	}
+	for _, ph := range m.Phones() {
+		if ph.UDID == id {
+			return otherNetwork(ph.Addr, localPrefixes())
+		}
+	}
+	return ""
+}
+
+func localPrefixes() []netip.Prefix {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := n.Mask.Size()
+		out = append(out, netip.PrefixFrom(ip.Unmap(), ones))
+	}
+	return out
+}
+
+func otherNetwork(phone netip.Addr, local []netip.Prefix) string {
+	phone = phone.Unmap()
+	if !phone.IsValid() || phone.IsLinkLocalUnicast() || phone.IsLoopback() {
+		return ""
+	}
+	var mine []string
+	for _, l := range local {
+		a := l.Addr()
+		if a.Is4() != phone.Is4() || a.IsLoopback() || a.IsLinkLocalUnicast() {
+			continue
+		}
+		if l.Masked().Contains(phone) {
+			return ""
+		}
+		mine = append(mine, a.String())
+	}
+	if len(mine) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("The iPhone is at %s, on another network than this computer (%s); put both on the same Wi-Fi network. ", phone, strings.Join(mine, ", "))
 }
