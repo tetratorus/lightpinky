@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -101,66 +100,23 @@ func bearer(token string, next http.Handler) http.Handler {
 }
 
 type phones struct {
-	p    *ios.Provider
+	p    phoneProvider
 	wifi bool
 
-	mu   sync.Mutex
-	open map[string]driver.Device
+	mu         sync.Mutex
+	open       map[string]driver.Device
+	unlockMu   sync.Mutex
+	openLocked func(context.Context, driver.Info) (driver.Device, error)
 }
 
 func (ph *phones) list(ctx context.Context) ([]driver.Info, error) {
-	infos, err := ph.p.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if infos == nil {
-		infos = []driver.Info{}
-	}
-	if ph.wifi {
-		for _, in := range infos {
-			ph.p.UseOverWiFi(in.ID)
-		}
-	}
-	return infos, nil
+	return ph.discover(ctx)
 }
 
 // device returns the open phone with this id, or the only online phone
 // when id is empty.
 func (ph *phones) device(ctx context.Context, id string) (driver.Device, error) {
-	ph.mu.Lock()
-	defer ph.mu.Unlock()
-	if id == "" {
-		infos, err := ph.list(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var online []string
-		for _, in := range infos {
-			if in.State == driver.StateOnline {
-				online = append(online, in.ID)
-			}
-		}
-		switch len(online) {
-		case 0:
-			return nil, errors.New("no iPhone is online; call devices to see why")
-		case 1:
-			id = online[0]
-		default:
-			return nil, fmt.Errorf("several iPhones are online (%s); pass device", strings.Join(online, ", "))
-		}
-	}
-	if d, ok := ph.open[id]; ok {
-		return d, nil
-	}
-	if _, err := ph.list(ctx); err != nil {
-		return nil, err
-	}
-	d, err := ph.p.Open(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	ph.open[id] = d
-	return d, nil
+	return ph.openDevice(ctx, id, false)
 }
 
 // drop closes a phone whose call failed, so the next call opens it again.
@@ -277,6 +233,11 @@ func done(err error) (*sdk.CallToolResult, any, error) {
 }
 
 func (ph *phones) register(srv *sdk.Server) {
+	sdk.AddTool(srv, &sdk.Tool{Name: "unlock", Description: "Wake and unlock the iPhone, including over Wi-Fi, using IPHONE_UNLOCK_CODE from the server environment. No passcode argument. Makes one passcode attempt; never retries input."},
+		func(ctx context.Context, _ *sdk.CallToolRequest, in devIn) (*sdk.CallToolResult, any, error) {
+			return done(ph.unlock(ctx, in.Device))
+		})
+
 	sdk.AddTool(srv, &sdk.Tool{Name: "devices", Description: "List iPhones this computer sees, with their state and, when not online, what they wait for."},
 		func(ctx context.Context, _ *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, any, error) {
 			infos, err := ph.list(ctx)
@@ -405,7 +366,11 @@ func (ph *phones) register(srv *sdk.Server) {
 			Wake bool `json:"wake,omitempty"`
 		}) (*sdk.CallToolResult, any, error) {
 			var st struct{ Locked, ScreenOn bool }
-			err := ph.with(ctx, in.Device, func(d driver.Device) (err error) {
+			d, err := ph.openDevice(ctx, in.Device, in.Wake)
+			if err != nil {
+				return fail(err), nil, nil
+			}
+			err = func() (err error) {
 				dev, err := core(d)
 				if err != nil {
 					return err
@@ -420,7 +385,7 @@ func (ph *phones) register(srv *sdk.Server) {
 				}
 				st.ScreenOn, err = dev.ScreenOn(ctx)
 				return err
-			})
+			}()
 			if err != nil {
 				return fail(err), nil, nil
 			}
