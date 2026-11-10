@@ -59,6 +59,42 @@ func (ph *phones) discover(ctx context.Context) ([]driver.Info, error) {
 	}
 }
 
+// waitPrepared lists the phones, waiting while the wanted phone (or, with no
+// id, every phone) is still being prepared by lightpinky itself, as a
+// Simulator is while its WebDriverAgent is built the first time.
+func (ph *phones) waitPrepared(ctx context.Context, id string) ([]driver.Info, error) {
+	until := time.Now().Add(prepareTimeout)
+	for {
+		infos, err := ph.list(ctx)
+		if err != nil {
+			return nil, err
+		}
+		preparing, ready := false, false
+		for _, in := range infos {
+			if id != "" && in.ID != id {
+				continue
+			}
+			if in.Setup == driver.SetupPreparing {
+				preparing = true
+			} else if in.State == driver.StateOnline {
+				ready = true
+			}
+		}
+		if !preparing || ready && id == "" || time.Now().After(until) {
+			return infos, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// prepareTimeout bounds waitPrepared; the first WebDriverAgent build after
+// an Xcode update can take minutes.
+var prepareTimeout = 15 * time.Minute
+
 func lockedWiFi(info driver.Info) bool {
 	return info.Connection == "wifi" && info.State == driver.StateNeedsSetup && info.Setup == driver.SetupUnlock
 }
@@ -73,7 +109,7 @@ func (ph *phones) openDevice(ctx context.Context, id string, interactive bool) (
 	if d := ph.open[id]; id != "" && d != nil {
 		return d, nil
 	}
-	infos, err := ph.list(ctx)
+	infos, err := ph.waitPrepared(ctx, id)
 	if err != nil {
 		return nil, err
 	}

@@ -345,7 +345,10 @@ func (c *wdaClient) do(ctx context.Context, hc *http.Client, method, path string
 
 // wdaScreen is /wda/screen: the screen in points and its scale.
 type wdaScreen struct {
-	Scale      float64 `json:"scale"`
+	Scale         float64 `json:"scale"`
+	StatusBarSize struct {
+		Height float64 `json:"height"`
+	} `json:"statusBarSize"`
 	ScreenSize struct {
 		Width  float64 `json:"width"`
 		Height float64 `json:"height"`
@@ -408,12 +411,15 @@ func (b *wdaBool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// source reads the page source without WDA's isVisible, which costs most
+// of the read (on the iOS 27 Simulator 5 s of 5.6 s on the home screen,
+// 1.1 s of 1.5 s in Settings); inferVisible derives it from the frames.
 func (c *wdaClient) source(ctx context.Context) (*wdaNode, error) {
 	var root wdaNode
 	// The tree of a busy screen takes seconds on a phone.
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := c.do(cctx, c.long, http.MethodGet, "/source?format=json", nil, &root); err != nil {
+	if err := c.do(cctx, c.long, http.MethodGet, "/source?format=json&excluded_attributes=visible", nil, &root); err != nil {
 		return nil, err
 	}
 	return &root, nil
