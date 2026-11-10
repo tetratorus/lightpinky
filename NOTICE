@@ -1,0 +1,8 @@
+lightpinky
+Copyright 2026 Leonard Tan
+
+This product includes software from Pinky (https://github.com/DIYgod/pinky),
+Copyright DIYgod, licensed under the Apache License 2.0. The code under
+internal/ is derived from Pinky's internal/driver, internal/driver/ios,
+internal/screen, internal/ocr, internal/video, internal/apppkg and
+internal/driver/android/mdns packages, with tests and non-iOS drivers removed.
