@@ -5,4 +5,5 @@
 - `python3 scripts/setup.py` bootstraps the pinned Go toolchain if needed and builds the executable. `scripts/phone tools` discovers MCP tools without client registration.
 - Explicit wake/unlock may open a paired, locked Wi-Fi phone through `ios.Open`; ordinary discovery stays passive. Do not mistake the provider's passive `SetupUnlock` status for an iOS prohibition on remote unlocking.
 - `unlock` uses only the server's `IPHONE_UNLOCK_CODE` environment variable. Retry transient connection failures before input, never passcode entry. Never log the code.
+- Simulators go through `internal/driver/ios/sim*.go` (simctl plus a pinned WebDriverAgent build) and are merged with real phones in `cmd/lightpinky/providers.go`. Check WDA changes against a booted Simulator.
 - Keep the portable skill in `.devin/skills/lightpinky-iphone/SKILL.md` as a pointer to the repository README, not a second copy of setup instructions.

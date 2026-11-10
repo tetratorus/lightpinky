@@ -35,6 +35,9 @@ type WDADevice struct {
 	l     *link             // the tunnel the run goes through, from iOS 17.4
 
 	scale float64
+	// statusBar is the status bar's height in portrait, in points: what
+	// scrolls under it does not show (inferVisible).
+	statusBar float64
 	// width and height are the screen's size in pixels when the phone was
 	// opened, in the orientation it had then; size gives it the right way
 	// up for the orientation last seen.
@@ -86,7 +89,8 @@ func openWDA(ctx context.Context, info driver.Info, c *wdaClient, entry goios.De
 	}
 	d := &WDADevice{
 		info: info, c: c, entry: entry, run: run,
-		scale:  scr.Scale,
+		scale:     scr.Scale,
+		statusBar: scr.StatusBarSize.Height,
 		width:  int(math.Round(scr.ScreenSize.Width * scr.Scale)),
 		height: int(math.Round(scr.ScreenSize.Height * scr.Scale)),
 	}
@@ -316,7 +320,35 @@ func (d *WDADevice) source(ctx context.Context) (*wdaNode, error) {
 			turnTree(w, root.Rect.Height, root.Rect.Width, q)
 		}
 	}
+	clip := root.Rect
+	if clip.Height > clip.Width && d.statusBar > 0 {
+		clip.Y += d.statusBar
+		clip.Height -= d.statusBar
+	}
+	inferVisible(root, clip)
 	return root, nil
+}
+
+// inferVisible marks a node visible when part of its frame shows inside
+// every framed ancestor's frame, as scroll views and the screen clip it.
+func inferVisible(n *wdaNode, clip wdaRect) {
+	r := n.Rect
+	n.Visible = wdaBool(r.Width > 0 && r.Height > 0 && overlap(r, clip))
+	if r.Width > 0 && r.Height > 0 {
+		clip = intersect(clip, r)
+	}
+	for i := range n.Children {
+		inferVisible(&n.Children[i], clip)
+	}
+}
+
+func overlap(a, b wdaRect) bool {
+	return a.X < b.X+b.Width && b.X < a.X+a.Width && a.Y < b.Y+b.Height && b.Y < a.Y+a.Height
+}
+
+func intersect(a, b wdaRect) wdaRect {
+	x, y := math.Max(a.X, b.X), math.Max(a.Y, b.Y)
+	return wdaRect{X: x, Y: y, Width: math.Max(0, math.Min(a.X+a.Width, b.X+b.Width)-x), Height: math.Max(0, math.Min(a.Y+a.Height, b.Y+b.Height)-y)}
 }
 
 // sidewaysWindows returns the windows of a landscape tree whose frame is
