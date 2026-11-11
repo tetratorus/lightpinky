@@ -36,7 +36,7 @@ type TypeStats struct {
 	Restored  time.Duration
 	Total     time.Duration
 	Trace     []string // the keys path: what the keyboard probes found, with times
-	Checked   string   // the field read back: "same", "different", "hidden", "unchanged", "unreadable"
+	Checked   string   // the field read back: "same", "different", "hidden", "unchanged", "unfocused", "unreadable"; or, when it could not be read, the app: "shown" (it shows the text), "unchanged"
 }
 
 // LastTypeStats returns how the last Type call went.
@@ -155,25 +155,37 @@ func (d *Device) typeText(ctx context.Context, text string, opt driver.TypeOptio
 			d.raxReady(rctx)
 			cancel()
 		}
-		pfield, value := d.focusedValue(ctx)
+		pfield, value, perr := d.focusedField(ctx)
 		var prior *string // nil when it could not be read
 		if pfield != nil {
 			prior = &value
 		}
+		// A focused field that cannot be read is checked by what the app
+		// shows instead (checkUnread), so remember that now.
+		var shown *shownText
+		look := func() {
+			if perr != nil {
+				if s, ok := d.readShown(ctx); ok {
+					shown = &s
+				}
+			}
+		}
 		var err error
 		if method == "paste" {
 			if err = clear(); err == nil {
+				look()
 				err = d.paste(ctx, pb, saved, text, &st)
 			}
 		} else {
 			// Keys go only where the keyboard turns them into this text,
 			// which typeKeys checks first, clearing the field after that.
+			look()
 			err = d.typeKeys(ctx, keys, clear, pbErr, &st)
 		}
 		if err != nil {
 			return err
 		}
-		if note, err = d.checkTyped(ctx, text, opt.Append, prior, method, pbErr, &st); err != nil {
+		if note, err = d.checkTyped(ctx, text, opt.Append, prior, shown, method, pbErr, &st); err != nil {
 			if opt.Submit {
 				err = fmt.Errorf("%w; Return was not pressed", err)
 			}
@@ -193,17 +205,39 @@ const raxDialWait = 8 * time.Second
 // error when it reads otherwise, so that wrong text never counts as typed:
 // keys arrive as other letters on a hardware keyboard layout other than
 // U.S., iOS corrects and capitalizes words typed as keys, and a field may
-// format or cut what is pasted. When the field cannot be read, or hides its
-// text, it returns a note for the agent instead. prior is the field's value
-// before, for appended text, nil when it could not be read. Callers hold
-// inputMu.
-func (d *Device) checkTyped(ctx context.Context, text string, appended bool, prior *string, method string, pbErr error, st *TypeStats) (string, error) {
-	const unread = "Pinky could not read the field back to check the text; look at the screen to be sure."
-	field, v := d.focusedValue(ctx)
+// format or cut what is pasted. It is an error too when the text most
+// likely went nowhere: no element of the app in front has focus, or the
+// field reads as before or empty (GitHub issue #65: a search field that
+// never took focus, and Type said nothing), or, for a field that cannot be
+// read, the app shows exactly what it did (issue #76). Only when the field
+// cannot be read and the app changed otherwise, or the field hides its
+// text, does it return a note for the agent instead.
+// When the field cannot be read, what the app shows tells instead
+// (checkUnread; shown is what it showed before typing, nil when unknown).
+// prior is the field's value before, for appended text, nil when it could
+// not be read. Callers hold inputMu.
+func (d *Device) checkTyped(ctx context.Context, text string, appended bool, prior *string, shown *shownText, method string, pbErr error, st *TypeStats) (string, error) {
+	unread := func() (string, error) { return d.checkUnread(ctx, text, shown, method, st) }
+	field, v, ferr := d.focusedField(ctx)
 	rax, err := d.raxNow()
-	if field == nil || err != nil {
-		st.Checked = "unreadable"
-		return unread, nil
+	if ferr != nil || err != nil {
+		return unread()
+	}
+	// The app in front may read as the on-screen keyboard's process (a
+	// keyboard extension, seen with Doubao Input) for a moment while it
+	// goes away, with nothing focused: read again before concluding.
+	for deadline := time.Now().Add(pasteConfirm); field == nil && ferr == nil && time.Now().Before(deadline); {
+		if err := sleepCtx(ctx, 100*time.Millisecond); err != nil {
+			return "", err
+		}
+		field, v, ferr = d.focusedField(ctx)
+	}
+	if ferr != nil {
+		return unread()
+	}
+	if field == nil {
+		st.Checked = "unfocused"
+		return "", errUnfocused
 	}
 	ok := func(v string) bool { return typedAs(v, text, appended, prior, st.Spaces) }
 	// Apps update a field's value a moment after the keys.
@@ -212,34 +246,45 @@ func (d *Device) checkTyped(ctx context.Context, text string, appended bool, pri
 			return "", err
 		}
 		if v, err = rax.stringAttribute(context.WithoutCancel(ctx), field, axpAttrValue); err != nil {
-			st.Checked = "unreadable"
-			return unread, nil
+			return unread()
 		}
 	}
+	checked, note, err := judgeTyped(v, text, appended, prior, method, pbErr, st.Spaces)
+	st.Checked = checked
+	return note, err
+}
+
+// errUnfocused is checkTyped's error when nothing in the app in front has
+// focus after typing.
+var errUnfocused = errors.New("type: no field has focus in the app in front, so the text most likely went nowhere: look at the screen, and if the text is not there, tap the field until it shows a cursor or the keyboard, then type again")
+
+// judgeTyped tells what a field that reads v after typing text says: how
+// it checked (TypeStats.Checked), a note for the agent when the text could
+// not be checked, or an error when the field reads otherwise than the text
+// or as if nothing went in.
+func judgeTyped(v, text string, appended bool, prior *string, method string, pbErr error, spaces string) (checked, note string, err error) {
 	switch {
-	case ok(v):
-		st.Checked = "same"
-		return "", nil
+	case typedAs(v, text, appended, prior, spaces):
+		return "same", "", nil
 	case hiddenText(v):
-		st.Checked = "hidden"
-		return "The field hides its text, so Pinky could not check what was typed.", nil
+		return "hidden", "The field hides its text, so Pinky could not check what was typed.", nil
 	case v == "" || (appended && prior != nil && v == *prior):
-		// Its value may not follow what is typed (a view of the app's
-		// own), or the text did not go in. A replaced value that reads
-		// as before is not this: typing the same wrong text again (an
+		// The text did not go in: the field never took focus or the keys
+		// went nowhere (GitHub issue #65). Or the value does not follow
+		// what is typed (a view of the app's own), which the agent can
+		// tell from the screen. A replaced value that reads as something
+		// else before is not this: typing the same wrong text again (an
 		// agent trying once more) must not pass.
-		st.Checked = "unchanged"
-		return "The field reads as it did before typing, or empty, so Pinky could not check the text; look at the screen to be sure.", nil
+		return "unchanged", "", errors.New("type: the field reads as it did before typing, or empty, so the text most likely did not go in (the field may not have taken focus): look at the screen, and if the text is not there, tap the field until it shows a cursor or the keyboard, then type again")
 	}
-	st.Checked = "different"
 	got, want := len([]rune(v)), len([]rune(text))
 	if appended && prior != nil {
 		want += len([]rune(*prior))
 	}
 	if method == "paste" {
-		return "", fmt.Errorf("type: after pasting, the field reads otherwise than the text (%d characters where %d were expected): the field may format, cut or change what it takes; read it before going on", got, want)
+		return "different", "", fmt.Errorf("type: after pasting, the field reads otherwise than the text (%d characters where %d were expected): the field may format, cut or change what it takes; read it before going on", got, want)
 	}
-	return "", fmt.Errorf("type: after typing by keys, because %s, the field reads otherwise than the text (%d characters where %d were expected): iOS may have corrected or capitalized words as they were typed, or the phone's hardware keyboard layout is not U.S.; read the field and fix it before going on", keysWhy(pbErr), got, want)
+	return "different", "", fmt.Errorf("type: after typing by keys, because %s, the field reads otherwise than the text (%d characters where %d were expected): iOS may have corrected or capitalized words as they were typed, or the phone's hardware keyboard layout is not U.S.; read the field and fix it before going on", keysWhy(pbErr), got, want)
 }
 
 // typedAs reports whether a field that reads v holds text as typed: the
@@ -436,24 +481,32 @@ func restorePasteboard(pb *pbConn, saved, mine *pbSnapshot) string {
 }
 
 // focusedValue returns the frontmost app's focused element and its value,
-// or nil when remoteAXService cannot tell.
+// or nil when remoteAXService cannot tell or nothing has focus.
 func (d *Device) focusedValue(ctx context.Context) (*axpObject, string) {
+	el, v, _ := d.focusedField(ctx)
+	return el, v
+}
+
+// focusedField is focusedValue that tells the two nils apart: an error
+// when remoteAXService cannot be asked or the value cannot be read, a nil
+// element without one when the app in front has nothing focused.
+func (d *Device) focusedField(ctx context.Context) (*axpObject, string, error) {
 	rax, err := d.raxNow()
 	if err != nil {
-		return nil, ""
+		return nil, "", err
 	}
 	// No deadline of its own: a request cut short marks the session broken,
 	// and each request already gives up after raxRequestTimeout.
 	c := context.WithoutCancel(ctx)
 	el, err := rax.focusedElement(c)
 	if err != nil || el == nil {
-		return nil, ""
+		return nil, "", err
 	}
 	v, err := rax.stringAttribute(c, el, axpAttrValue)
 	if err != nil {
-		return nil, ""
+		return nil, "", err
 	}
-	return el, v
+	return el, v, nil
 }
 
 // waitValueChange waits until field's value differs from before, and returns

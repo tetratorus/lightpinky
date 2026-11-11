@@ -68,18 +68,22 @@ The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/l
 | `download_disk_image` | Fetch the developer disk image |
 | `unlock` | Wake and unlock using the server's `IPHONE_UNLOCK_CODE`, including over Wi-Fi |
 | `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by |
-| `elements` | App in front, lock/keyboard state, then one line per element: role, label, id, center `@x,y`, bounds, states. `json` returns the full structure |
-| `tap` | Tap or long-press `x`, `y` |
-| `swipe` | Swipe `x1,y1` → `x2,y2` over `duration_ms` |
-| `type` | Type into the focused field (via the pasteboard, any language) |
+| `elements` | App in front, lock/keyboard state, then one line per element: `[ref]`, role, label, id, center `@x,y`, bounds, states. Refs stay the same while an element does. `ocr` adds text read from the screen image (web pages, games, apps that draw their own text); done anyway when the tree is nearly empty. `json` returns the full structure |
+| `tap` | Tap or long-press an element by `ref`, or `x`, `y`. A point is refused when that part of the screen changed since the last read; `force` taps anyway |
+| `swipe` | Swipe a `direction` across the screen or inside `ref` (a list, a carousel), or `x1,y1` → `x2,y2` over `duration_ms` |
+| `drag` | Press at `ref` or `from`, optionally `hold_ms`, move through up to 8 `via` points to `to` |
+| `pinch` | Two-finger zoom on `ref`, `x,y` or the center: `scale` above 1 zooms in, `rotation` turns |
+| `type` | Type into the focused field (via the pasteboard, any language); fails when the screen shows it plainly did not go in |
 | `key` | `home`, `back`, `enter`, `delete`, … |
 | `launch` | Open an app by bundle id or name |
+| `wait_for` | Wait for `text` (or `any` of several) to show, or with `gone` to go away, up to `timeout_ms`; looks in the tree and, now and then, the screen image |
+| `batch` | Up to 50 action steps in order, each settling first; stops at the first that fails |
 | `apps` | Installed apps |
 | `stop_app` | Quit an app |
 | `open_link` | Open a URL in the app iOS would open it in |
 | `power` | Locked / screen on, optionally wake the screen |
 
-Device tools take an optional `device` (UDID); omit it when only one usable phone is found. Actions (`tap`, `swipe`, `type`, `key`, `launch`, `stop_app`, `open_link`) return once the screen stops changing, for up to 2 s, so the next `elements` or `screenshot` sees the result; `no_settle` returns immediately. Wake/unlock also consider locked Wi-Fi phones. With several phones, pass the desired ID from `devices`.
+Device tools take an optional `device` (UDID); omit it when only one usable phone is found. Actions (`tap`, `swipe`, `drag`, `pinch`, `type`, `key`, `launch`, `stop_app`, `open_link`) wait for the screen to stop changing, for up to 2 s, then reply with what changed since the last read: lines starting `+` are new, `-` gone, `~` changed. When the app or most of the screen changed they reply with the whole screen. `no_settle` returns at once without reading. Wake/unlock also consider locked Wi-Fi phones. With several phones, pass the desired ID from `devices`.
 
 ## What is not here
 
