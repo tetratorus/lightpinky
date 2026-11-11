@@ -1,40 +1,17 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"image"
 	"image/color"
 	"strings"
 	"time"
 
-	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tetratorus/lightpinky/internal/driver"
 	"github.com/tetratorus/lightpinky/internal/screen"
 )
 
 // settleLimit is how long an action waits for the screen to stop changing.
 const settleLimit = 2 * time.Second
-
-// act runs an action on the phone, then waits for the screen to settle
-// unless in.NoSettle, so a read right after sees where it led.
-func (ph *phones) act(ctx context.Context, in actIn, f func(driver.Device) error) (*sdk.CallToolResult, any, error) {
-	msg := "ok"
-	err := ph.with(ctx, in.Device, func(d driver.Device) error {
-		if err := f(d); err != nil {
-			return err
-		}
-		if s, ok := d.(driver.Settler); ok && !in.NoSettle {
-			msg = settleNote(s.WaitSettled(ctx, settleLimit))
-		}
-		return nil
-	})
-	if err != nil {
-		return fail(err), nil, nil
-	}
-	return text(msg), nil, nil
-}
 
 func settleNote(settled bool, err error) string {
 	switch {
@@ -57,16 +34,32 @@ func renderScreen(s *screen.Screen) string {
 	}
 	seen := map[string]bool{}
 	for _, e := range s.Elements {
-		var line strings.Builder
-		writeElement(&line, e)
+		line := elementLine(e)
 		// Trees can list one element twice (the keyboard's Dictate button).
-		if seen[line.String()] {
+		if seen[plainLine(e)] {
 			continue
 		}
-		seen[line.String()] = true
+		seen[plainLine(e)] = true
 		b.WriteByte('\n')
-		b.WriteString(line.String())
+		b.WriteString(line)
 	}
+	return b.String()
+}
+
+// elementLine is one element as text, its ref first.
+func elementLine(e screen.Element) string {
+	var b strings.Builder
+	if e.Ref != 0 {
+		fmt.Fprintf(&b, "[%d] ", e.Ref)
+	}
+	writeElement(&b, e)
+	return b.String()
+}
+
+// plainLine is the element without its ref, to tell repeats apart.
+func plainLine(e screen.Element) string {
+	var b strings.Builder
+	writeElement(&b, e)
 	return b.String()
 }
 

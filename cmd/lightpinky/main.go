@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -125,6 +124,9 @@ type phones struct {
 	open       map[string]driver.Device
 	unlockMu   sync.Mutex
 	openLocked func(context.Context, driver.Info) (driver.Device, error)
+
+	viewMu sync.Mutex
+	views  map[string]*view
 }
 
 func (ph *phones) list(ctx context.Context) ([]driver.Info, error) {
@@ -181,7 +183,11 @@ type devIn struct {
 // to settle by default, so the next read sees where the action led.
 type actIn struct {
 	devIn
-	NoSettle bool `json:"no_settle,omitempty" jsonschema:"return at once instead of waiting (up to 2 s) for the screen to stop changing"`
+	NoSettle bool `json:"no_settle,omitempty" jsonschema:"return at once, without waiting (up to 2 s) for the screen to stop changing or reading it"`
+	OCR      bool `json:"ocr,omitempty" jsonschema:"also read text from the screen image when reading the screen after (slower)"`
+
+	quiet bool // in a batch before the last step: settle, but do not read the screen
+	full  bool // reply with the whole screen rather than what changed
 }
 
 type shotIn struct {
@@ -192,22 +198,61 @@ type shotIn struct {
 type elementsIn struct {
 	devIn
 	JSON bool `json:"json,omitempty" jsonschema:"the full observation as JSON instead of one line per element"`
+	OCR  bool `json:"ocr,omitempty" jsonschema:"also read text from the screen image, for what the accessibility tree leaves out (web pages, games, apps that draw their own text); slower. Done anyway when the tree is nearly empty"`
 }
 
 type tapIn struct {
 	actIn
-	X         int  `json:"x" jsonschema:"x in screenshot pixels"`
-	Y         int  `json:"y" jsonschema:"y in screenshot pixels"`
+	targetIn
+	X         int  `json:"x,omitempty" jsonschema:"x in screenshot pixels, when no ref"`
+	Y         int  `json:"y,omitempty" jsonschema:"y in screenshot pixels, when no ref"`
 	LongPress bool `json:"long_press,omitempty"`
 }
 
 type swipeIn struct {
 	actIn
-	X1         int `json:"x1"`
-	Y1         int `json:"y1"`
-	X2         int `json:"x2"`
-	Y2         int `json:"y2"`
-	DurationMS int `json:"duration_ms,omitempty" jsonschema:"default 300"`
+	Direction  string `json:"direction,omitempty" jsonschema:"up, down, left or right: the way the finger moves (up shows what is below), across most of the screen or of ref; instead of x1..y2"`
+	Ref        int    `json:"ref,omitempty" jsonschema:"with direction: swipe inside this element, e.g. a list or a carousel"`
+	X1         int    `json:"x1,omitempty"`
+	Y1         int    `json:"y1,omitempty"`
+	X2         int    `json:"x2,omitempty"`
+	Y2         int    `json:"y2,omitempty"`
+	DurationMS int    `json:"duration_ms,omitempty" jsonschema:"default 300"`
+}
+
+type dragPoint struct {
+	X       int `json:"x"`
+	Y       int `json:"y"`
+	PauseMS int `json:"pause_ms,omitempty" jsonschema:"stay here this long before moving on"`
+}
+
+type dragIn struct {
+	actIn
+	targetIn
+	From       *dragPoint  `json:"from,omitempty" jsonschema:"where the finger goes down, when no ref"`
+	To         dragPoint   `json:"to" jsonschema:"where the finger lifts"`
+	Via        []dragPoint `json:"via,omitempty" jsonschema:"up to 8 points to pass through on the way"`
+	HoldMS     int         `json:"hold_ms,omitempty" jsonschema:"press this long before moving, e.g. 800 to pick up an icon or a list row"`
+	DurationMS int         `json:"duration_ms,omitempty" jsonschema:"time for each leg of the path; default 500"`
+}
+
+type pinchIn struct {
+	actIn
+	Ref        int     `json:"ref,omitempty" jsonschema:"pinch on this element, e.g. a map or photo; else around x,y or the screen's center"`
+	X          int     `json:"x,omitempty"`
+	Y          int     `json:"y,omitempty"`
+	Scale      float64 `json:"scale" jsonschema:"how far the fingers spread: 2 zooms in twice, 0.5 zooms out; 0.2 to 5"`
+	Rotation   float64 `json:"rotation,omitempty" jsonschema:"degrees to turn the fingers, clockwise when positive"`
+	DurationMS int     `json:"duration_ms,omitempty" jsonschema:"default 500"`
+}
+
+type waitIn struct {
+	devIn
+	Text      string   `json:"text,omitempty" jsonschema:"text to wait for, ignoring case, as whole words"`
+	Any       []string `json:"any,omitempty" jsonschema:"wait for whichever of these shows first"`
+	Gone      bool     `json:"gone,omitempty" jsonschema:"wait for the text to go away instead"`
+	TimeoutMS int      `json:"timeout_ms,omitempty" jsonschema:"default 10000, at most 60000"`
+	NoOCR     bool     `json:"no_ocr,omitempty" jsonschema:"look only in the accessibility tree, not in text read from the screen image"`
 }
 
 type typeIn struct {
@@ -313,7 +358,9 @@ func (ph *phones) register(srv *sdk.Server) {
 		func(ctx context.Context, _ *sdk.CallToolRequest, in elementsIn) (*sdk.CallToolResult, any, error) {
 			var s *screen.Screen
 			err := ph.with(ctx, in.Device, func(d driver.Device) (err error) {
-				s, err = d.Observe(ctx, driver.ObserveOptions{})
+				if s, err = ph.read(ctx, d, in.OCR); err == nil {
+					ph.view(d).set(s)
+				}
 				return err
 			})
 			if err != nil {
@@ -325,44 +372,15 @@ func (ph *phones) register(srv *sdk.Server) {
 			return text(renderScreen(s)), nil, nil
 		})
 
-	sdk.AddTool(srv, &sdk.Tool{Name: "tap", Description: "Tap, or long-press, a point in screenshot pixels."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in tapIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Tap(ctx, screen.Point{X: in.X, Y: in.Y}, driver.TapOptions{LongPress: in.LongPress})
-			})
-		})
-
-	sdk.AddTool(srv, &sdk.Tool{Name: "swipe", Description: "Swipe from one point to another in screenshot pixels. To scroll a list down, swipe up over it."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in swipeIn) (*sdk.CallToolResult, any, error) {
-			dur := time.Duration(in.DurationMS) * time.Millisecond
-			if dur <= 0 {
-				dur = 300 * time.Millisecond
-			}
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Swipe(ctx, screen.Point{X: in.X1, Y: in.Y1}, screen.Point{X: in.X2, Y: in.Y2}, dur)
-			})
-		})
-
-	sdk.AddTool(srv, &sdk.Tool{Name: "type", Description: "Type text into the focused field (through the pasteboard, so any language works). Replaces the field's text unless append is set."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in typeIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Type(ctx, in.Text, driver.TypeOptions{Append: in.Append, Submit: in.Submit})
-			})
-		})
-
-	sdk.AddTool(srv, &sdk.Tool{Name: "key", Description: "Press a hardware or keyboard key."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in keyIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Key(ctx, driver.Key(in.Key))
-			})
-		})
-
-	sdk.AddTool(srv, &sdk.Tool{Name: "launch", Description: "Open an app by bundle id or name, bringing it to the front."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in launchIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Launch(ctx, in.App)
-			})
-		})
+	actTool(srv, "tap", "Tap, or long-press, an element by ref, or a point in screenshot pixels. A point is refused when that part of the screen changed since your last read; force: true taps anyway. Like every action here, it waits for the screen to settle and replies with what changed since your last read: lines with + are new, - gone, ~ changed.", ph.tap)
+	actTool(srv, "swipe", "Swipe the way direction says, across the screen or inside ref (a list, a carousel); or from x1,y1 to x2,y2 in screenshot pixels. To scroll down a list, swipe up.", ph.swipe)
+	actTool(srv, "drag", "Press at ref or from, optionally hold, then move through via to to and lift: move icons, reorder rows, use sliders or draw.", ph.drag)
+	actTool(srv, "pinch", "Pinch with two fingers on ref, around x,y, or on the screen's center: scale above 1 zooms in, below 1 zooms out; rotation turns.", ph.pinch)
+	actTool(srv, "type", "Type text into the focused field. Replaces the field's text unless append is set. Fails when the text plainly did not go in.", ph.typeText)
+	actTool(srv, "key", "Press a hardware or keyboard key.", ph.key)
+	actTool(srv, "launch", "Open an app by bundle id or name, bringing it to the front.", ph.launch)
+	actTool(srv, "wait_for", "Wait until text shows on the screen, or with gone: true until it goes away, reading the accessibility tree and the screen image; replies with the screen. An error when it timed out.", ph.waitFor)
+	actTool(srv, "batch", "Run up to 50 steps in order (tap, swipe, drag, pinch, type, key, launch, open_link, stop_app, wait_for, each with that tool's args), each settling before the next; stops at the first that fails. Steps after the first are not checked against a changed screen. Replies with each step's result and the whole screen at the end.", ph.batch)
 
 	sdk.AddTool(srv, &sdk.Tool{Name: "apps", Description: "List installed apps with bundle ids."},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in devIn) (*sdk.CallToolResult, any, error) {
@@ -377,33 +395,8 @@ func (ph *phones) register(srv *sdk.Server) {
 			return text(apps), nil, nil
 		})
 
-	sdk.AddTool(srv, &sdk.Tool{Name: "stop_app", Description: "Quit an app by bundle id."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in launchIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				st, ok := d.(interface {
-					StopApp(context.Context, string) error
-				})
-				if !ok {
-					return unsupported(d)
-				}
-				return st.StopApp(ctx, in.App)
-			})
-		})
-
-	sdk.AddTool(srv, &sdk.Tool{Name: "open_link", Description: "Open a URL in the app iOS would open it in."},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in linkIn) (*sdk.CallToolResult, any, error) {
-			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				lo, ok := d.(driver.LinkOpener)
-				if !ok {
-					return unsupported(d)
-				}
-				app, err := lo.LinkApp(ctx, in.URL)
-				if err != nil {
-					return err
-				}
-				return lo.OpenLink(ctx, in.URL, app)
-			})
-		})
+	actTool(srv, "stop_app", "Quit an app by bundle id.", ph.stopApp)
+	actTool(srv, "open_link", "Open a URL in the app iOS would open it in.", ph.openLink)
 
 	sdk.AddTool(srv, &sdk.Tool{Name: "power", Description: "Report whether the phone is locked and its screen on; wake: true lights the screen first."},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in struct {
@@ -444,4 +437,49 @@ func (ph *phones) register(srv *sdk.Server) {
 			}
 			return text(st), nil, nil
 		})
+}
+
+func actTool[T any](srv *sdk.Server, name, desc string, f func(context.Context, T) *sdk.CallToolResult) {
+	sdk.AddTool(srv, &sdk.Tool{Name: name, Description: desc},
+		func(ctx context.Context, _ *sdk.CallToolRequest, in T) (*sdk.CallToolResult, any, error) {
+			return f(ctx, in), nil, nil
+		})
+}
+
+func (ph *phones) key(ctx context.Context, in keyIn) *sdk.CallToolResult {
+	return ph.act(ctx, in.actIn, false, func(d driver.Device, _, _ *screen.Screen) (string, error) {
+		return "", d.Key(ctx, driver.Key(in.Key))
+	}, nil)
+}
+
+func (ph *phones) launch(ctx context.Context, in launchIn) *sdk.CallToolResult {
+	return ph.act(ctx, in.actIn, false, func(d driver.Device, _, _ *screen.Screen) (string, error) {
+		return "", d.Launch(ctx, in.App)
+	}, nil)
+}
+
+func (ph *phones) stopApp(ctx context.Context, in launchIn) *sdk.CallToolResult {
+	return ph.act(ctx, in.actIn, false, func(d driver.Device, _, _ *screen.Screen) (string, error) {
+		st, ok := d.(interface {
+			StopApp(context.Context, string) error
+		})
+		if !ok {
+			return "", unsupported(d)
+		}
+		return "", st.StopApp(ctx, in.App)
+	}, nil)
+}
+
+func (ph *phones) openLink(ctx context.Context, in linkIn) *sdk.CallToolResult {
+	return ph.act(ctx, in.actIn, false, func(d driver.Device, _, _ *screen.Screen) (string, error) {
+		lo, ok := d.(driver.LinkOpener)
+		if !ok {
+			return "", unsupported(d)
+		}
+		app, err := lo.LinkApp(ctx, in.URL)
+		if err != nil {
+			return "", err
+		}
+		return "", lo.OpenLink(ctx, in.URL, app)
+	}, nil)
 }
