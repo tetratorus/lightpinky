@@ -93,17 +93,17 @@ func findEntry(udid string, wifi bool) (goios.DeviceEntry, error) {
 	return pickEntry(list, udid, wifi)
 }
 
-// entryFor is findEntry(id, false) through the provider's usbmuxd list,
-// which tests replace.
+// entryFor applies the provider's transport choice to its usbmuxd list,
+// which tests replace. WiFiOnly never falls back to USB.
 func (p *Provider) entryFor(id string) (goios.DeviceEntry, error) {
 	if p.listFn == nil {
-		return findEntry(id, false)
+		return findEntry(id, p.WiFiOnly)
 	}
 	list, err := p.listFn()
 	if err != nil {
 		return goios.DeviceEntry{}, fmt.Errorf("usbmuxd: %w", err)
 	}
-	return pickEntry(list, id, false)
+	return pickEntry(list, id, p.WiFiOnly)
 }
 
 // pickEntry is findEntry's choice in a list usbmuxd gave.

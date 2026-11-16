@@ -40,12 +40,14 @@ func phonesFile() string {
 func run() error {
 	device := flag.String("device", "", "phone UDID; default: the only online iPhone")
 	interval := flag.Duration("interval", 500*time.Millisecond, "minimum time between emitted frames")
+	wifiOnly := flag.Bool("wifi-only", false, "use Wi-Fi even when USB is connected; never fall back to USB")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	p := ios.NewProvider()
+	p.WiFiOnly = *wifiOnly
 	p.PhonesFile = phonesFile()
 	p.UseSavedPhones()
 	p.WiFiMux = true

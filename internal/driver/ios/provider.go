@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tetratorus/lightpinky/internal/driver"
 	goios "github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/imagemounter"
+	"github.com/tetratorus/lightpinky/internal/driver"
 )
 
 // minIOS is the first iOS whose CoreDevice services stream the screen and
@@ -39,6 +39,10 @@ type Provider struct {
 	// app's provider sets it: it points go-ios, for the whole process, at
 	// that usbmuxd, which then carries every connection to an iPhone.
 	WiFiMux bool
+
+	// WiFiOnly ignores USB connections, even for phones on both transports.
+	// Set before using the provider; Wi-Fi must also be enabled with SetWiFi.
+	WiFiOnly bool
 
 	// PhonesFile keeps the UDIDs of the phones the person uses over Wi-Fi
 	// (phones.go); "" for none.
@@ -222,12 +226,15 @@ func (p *Provider) foundOnly(e goios.DeviceEntry) bool {
 }
 
 // entries picks one usbmuxd entry per phone, sorted by UDID. A phone on USB
-// and Wi-Fi at once is listed twice; USB wins. Entries over the network
-// count only while Pinky uses phones over Wi-Fi, and not for phones the
-// person removed or ignored (wifi.go).
+// and Wi-Fi at once is listed twice; USB wins unless WiFiOnly is set.
+// Entries over the network count only while Pinky uses phones over Wi-Fi,
+// and not for phones the person removed or ignored (wifi.go).
 func (p *Provider) entries(list []goios.DeviceEntry) []goios.DeviceEntry {
 	byID := map[string]goios.DeviceEntry{}
 	for _, e := range list {
+		if p.WiFiOnly && e.Properties.ConnectionType != "Network" {
+			continue
+		}
 		if p.Only != nil && !p.Only[e.Properties.SerialNumber] {
 			continue
 		}
