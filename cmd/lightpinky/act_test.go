@@ -29,6 +29,37 @@ func TestRenderScreenOneLinePerElement(t *testing.T) {
 	}
 }
 
+func TestMatchElement(t *testing.T) {
+	s := &screen.Screen{Elements: []screen.Element{
+		{Role: "button", Label: "Save", Bounds: screen.Rect{X: 900, Y: 2400, W: 200, H: 100}},
+		{Role: "button", Label: "Save Draft", Bounds: screen.Rect{X: 48, Y: 1200, W: 200, H: 100}},
+		{Role: "text", Label: "unsaved changes", Bounds: screen.Rect{X: 48, Y: 1100, W: 300, H: 60}},
+		{Role: "button", Label: "Delete", Bounds: screen.Rect{}},
+	}}
+	pt, err := matchElement(s, "save", "", nil)
+	if err == nil {
+		t.Fatalf("ambiguous match returned %v", pt)
+	}
+	if !strings.Contains(err.Error(), "3 elements match") {
+		t.Fatalf("error %q", err)
+	}
+	one := 1
+	pt, err = matchElement(s, "SAVE", "", &one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != (screen.Point{X: 148, Y: 1250}) {
+		t.Fatalf("point %v", pt)
+	}
+	pt, err = matchElement(s, "save", "button", nil)
+	if err == nil {
+		t.Fatal("role filter did not disambiguate")
+	}
+	if _, err = matchElement(s, "cancel", "", nil); err == nil {
+		t.Fatal("expected no match")
+	}
+}
+
 func TestShrink(t *testing.T) {
 	for _, c := range []struct{ w, h, max, k int }{
 		{1206, 2622, 0, 1}, {1206, 2622, 3000, 1}, {1206, 2622, 900, 3}, {1206, 2622, 1311, 2}, {1206, 2622, 1310, 3},

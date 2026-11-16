@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetratorus/lightpinky/internal/driver"
 )
@@ -158,5 +159,36 @@ func TestCanceledDiscoveryReturnsPromptly(t *testing.T) {
 	}
 	if p.lists != 0 {
 		t.Fatal("must not start discovery after cancellation")
+	}
+}
+
+type discoveryErrorProvider struct {
+	testProvider
+	err error
+}
+
+func (p *discoveryErrorProvider) WiFiDiscoveryError() error { return p.err }
+
+func TestDiscoveryReportsWiFiError(t *testing.T) {
+	want := errors.New("Wi-Fi discovery blocked")
+	p := &discoveryErrorProvider{err: want}
+	ph := &phones{p: p, wifi: true}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := ph.list(ctx); !errors.Is(err, want) {
+		t.Fatalf("expected discovery error, got %v", err)
+	}
+}
+
+func TestWiFiDiscoveryErrorDoesNotHideDevices(t *testing.T) {
+	for _, connection := range []string{"usb", "wifi", "simulator"} {
+		p := &discoveryErrorProvider{
+			testProvider: testProvider{infos: []driver.Info{{ID: "phone", Connection: connection}}},
+			err:          errors.New("Wi-Fi discovery blocked"),
+		}
+		ph := &phones{p: p, wifi: true}
+		if infos, err := ph.list(context.Background()); err != nil || len(infos) != 1 {
+			t.Fatalf("%s device hidden: %v %v", connection, infos, err)
+		}
 	}
 }

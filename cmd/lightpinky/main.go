@@ -49,6 +49,9 @@ func main() {
 	p.UseSavedPhones()
 	p.SetWiFi(*wifi)
 	all := &allPhones{phone: p}
+	if runtime.GOOS == "darwin" {
+		all.native = ios.NewNativeProvider()
+	}
 	if *sims {
 		sp := ios.NewSimProvider(simulatorDir())
 		sp.Log = log
@@ -196,9 +199,12 @@ type elementsIn struct {
 
 type tapIn struct {
 	actIn
-	X         int  `json:"x" jsonschema:"x in screenshot pixels"`
-	Y         int  `json:"y" jsonschema:"y in screenshot pixels"`
-	LongPress bool `json:"long_press,omitempty"`
+	X         int     `json:"x,omitempty" jsonschema:"x in screenshot pixels; optional when find is set"`
+	Y         int     `json:"y,omitempty" jsonschema:"y in screenshot pixels"`
+	LongPress bool    `json:"long_press,omitempty"`
+	Find      string  `json:"find,omitempty" jsonschema:"tap the element whose label contains this text (case-insensitive) instead of x/y; the screen is observed first"`
+	Role      string  `json:"role,omitempty" jsonschema:"with find: only match elements of this role (button, text, ...)"`
+	Index     *int    `json:"index,omitempty" jsonschema:"with find: which match to tap when several match; required then"`
 }
 
 type swipeIn struct {
@@ -325,10 +331,19 @@ func (ph *phones) register(srv *sdk.Server) {
 			return text(renderScreen(s)), nil, nil
 		})
 
-	sdk.AddTool(srv, &sdk.Tool{Name: "tap", Description: "Tap, or long-press, a point in screenshot pixels."},
+	sdk.AddTool(srv, &sdk.Tool{Name: "tap", Description: "Tap, or long-press, a point in screenshot pixels, or the element found by label."},
 		func(ctx context.Context, _ *sdk.CallToolRequest, in tapIn) (*sdk.CallToolResult, any, error) {
 			return ph.act(ctx, in.actIn, func(d driver.Device) error {
-				return d.Tap(ctx, screen.Point{X: in.X, Y: in.Y}, driver.TapOptions{LongPress: in.LongPress})
+				pt := screen.Point{X: in.X, Y: in.Y}
+				if in.Find != "" {
+					var err error
+					if pt, err = findElement(ctx, d, in.Find, in.Role, in.Index); err != nil {
+						return err
+					}
+				} else if in.X == 0 && in.Y == 0 {
+					return errors.New("tap needs x/y or find")
+				}
+				return d.Tap(ctx, pt, driver.TapOptions{LongPress: in.LongPress})
 			})
 		})
 

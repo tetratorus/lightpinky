@@ -68,6 +68,8 @@ func (m *Mux) heartbeat(ctx context.Context, p Phone, id int) {
 		connect = connectHeartbeat
 	}
 	wait := time.Second
+	fails := 0
+	warned := false
 	for ctx.Err() == nil {
 		if m.upstreamListsOnNetwork(p.UDID) {
 			// The system's usbmuxd lists it on the network itself (Apple's
@@ -89,16 +91,33 @@ func (m *Mux) heartbeat(ctx context.Context, p Phone, id int) {
 			c.Close()
 			if time.Since(start) > heartbeatRetry {
 				wait = time.Second // it ran for a while: start again soon
+				fails, warned = 0, false
+			} else {
+				fails++
 			}
+		} else {
+			fails++
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		m.log.Debug("netmux: the phone's heartbeat ended; starting it again", "device", p.UDID, "err", err, "in", wait)
+		// A heartbeat that keeps failing may mean the phone's heartbeat
+		// daemon is wedged: nothing here revives it, but poking it every
+		// 30 s only piles stalled handshakes onto it. Back off and say so
+		// once, so the state is visible rather than silent.
+		gap := wait
+		if fails >= 6 {
+			gap = heartbeatRetry * 4
+			if !warned {
+				warned = true
+				m.log.Info("netmux: the phone's heartbeat is not establishing; a phone restart may be needed for Wi-Fi control", "device", p.UDID)
+			}
+		}
+		m.log.Debug("netmux: the phone's heartbeat ended; starting it again", "device", p.UDID, "err", err, "in", gap)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(gap):
 		}
 		wait = min(2*wait, heartbeatRetry)
 	}

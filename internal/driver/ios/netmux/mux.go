@@ -354,22 +354,34 @@ func (m *Mux) listDevices(c net.Conn, h header, body []byte) error {
 		rh, list.DeviceList = header{Version: 1, Request: 8, Tag: h.Tag}, nil
 	}
 	// A usbmuxd that lists phones on the network itself (usbmuxd2,
-	// netmuxd in its place) keeps its own entries.
-	upNet := map[string]bool{}
-	for _, d := range list.DeviceList {
-		if props, ok := d["Properties"].(map[string]any); ok && props["ConnectionType"] == "Network" {
-			if id, ok := props["SerialNumber"].(string); ok {
-				upNet[id] = true
-			}
-		}
-	}
+	// netmuxd in its place) keeps its own entries — unless the Mux found
+	// the phone itself: Apple's usbmuxd attaches a network phone only
+	// while a client is connected and detaches it on release, so its
+	// listing flaps and its heartbeat cannot hold; the Mux's own entry
+	// and heartbeat are steadier, so upstream's copy is hidden for those.
 	m.mu.Lock()
-	m.upNet = upNet
-	var phones []netPhone
-	for _, p := range m.phones {
-		if !upNet[p.UDID] {
-			phones = append(phones, p)
+	managed := map[string]bool{}
+	for id := range m.phones {
+		managed[id] = true
+	}
+	upNet := map[string]bool{}
+	kept := list.DeviceList[:0]
+	for _, d := range list.DeviceList {
+		props, ok := d["Properties"].(map[string]any)
+		id, _ := props["SerialNumber"].(string)
+		if ok && props["ConnectionType"] == "Network" && managed[id] {
+			continue
 		}
+		if ok && props["ConnectionType"] == "Network" {
+			upNet[id] = true
+		}
+		kept = append(kept, d)
+	}
+	list.DeviceList = kept
+	m.upNet = upNet
+	phones := make([]netPhone, 0, len(m.phones))
+	for _, p := range m.phones {
+		phones = append(phones, p)
 	}
 	m.mu.Unlock()
 	sort.Slice(phones, func(i, j int) bool { return phones[i].id < phones[j].id })

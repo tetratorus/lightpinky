@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -44,6 +45,59 @@ func settleNote(settled bool, err error) string {
 		return fmt.Sprintf("ok (the screen was still changing after %s)", settleLimit)
 	}
 	return "ok"
+}
+
+// findElement observes the screen and returns the center of the element
+// whose label contains needle (case-insensitive), restricted to role when
+// set. Several matches need index; without it they are listed in the error.
+func findElement(ctx context.Context, d driver.Device, needle, role string, index *int) (screen.Point, error) {
+	s, err := d.Observe(ctx, driver.ObserveOptions{})
+	if err != nil {
+		return screen.Point{}, err
+	}
+	return matchElement(s, needle, role, index)
+}
+
+func matchElement(s *screen.Screen, needle, role string, index *int) (screen.Point, error) {
+	needle = strings.ToLower(needle)
+	var matches []screen.Element
+	seen := map[string]bool{}
+	for _, e := range s.Elements {
+		if role != "" && e.Role != role {
+			continue
+		}
+		if e.Bounds.Empty() || !strings.Contains(strings.ToLower(e.Label), needle) {
+			continue
+		}
+		var line strings.Builder
+		writeElement(&line, e)
+		if seen[line.String()] {
+			continue
+		}
+		seen[line.String()] = true
+		matches = append(matches, e)
+	}
+	if len(matches) == 0 {
+		return screen.Point{}, fmt.Errorf("no element label contains %q", needle)
+	}
+	i := 0
+	if len(matches) > 1 {
+		if index == nil {
+			var b strings.Builder
+			fmt.Fprintf(&b, "%d elements match %q; pass index to pick one:", len(matches), needle)
+			for j, e := range matches {
+				b.WriteByte('\n')
+				fmt.Fprintf(&b, "%d: ", j)
+				writeElement(&b, e)
+			}
+			return screen.Point{}, errors.New(b.String())
+		}
+		i = *index
+	}
+	if i < 0 || i >= len(matches) {
+		return screen.Point{}, fmt.Errorf("index %d out of range: %d elements match %q", i, len(matches), needle)
+	}
+	return matches[i].Bounds.Center(), nil
 }
 
 // renderScreen is the observation as text: a header, then one line per

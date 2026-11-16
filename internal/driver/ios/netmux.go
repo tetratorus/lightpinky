@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tetratorus/lightpinky/internal/driver/ios/netmux"
 	goios "github.com/danielpaulus/go-ios/ios"
+	"github.com/tetratorus/lightpinky/internal/driver/ios/netmux"
 )
 
 // Phones over Wi-Fi on Linux and Windows. libimobiledevice's usbmuxd, the
@@ -63,6 +63,7 @@ func forgetInheritedMux() {
 type muxState struct {
 	mu      sync.Mutex
 	mux     *netmux.Mux
+	finder  *netmux.Finder
 	stop    context.CancelFunc // ends the search while it runs
 	skipped bool               // USBMUXD_SOCKET_ADDRESS was set, or the socket failed
 
@@ -98,7 +99,8 @@ func (p *Provider) wifiMux(on bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.stop = cancel
-	f := &netmux.Finder{Mux: m.mux, UDIDs: p.pairedUDIDs, Log: p.logger(), BrowseFn: m.browseFn}
+	f := &netmux.Finder{Mux: m.mux, UDIDs: p.pairedUDIDs, Log: p.logger(), BrowseFn: m.browseFn, StatePath: p.wifiStatePath()}
+	m.finder = f
 	if m.probeFn != nil {
 		f.ProbeFn = m.probeFn
 	}
@@ -106,6 +108,18 @@ func (p *Provider) wifiMux(on bool) {
 		f.PairFn = m.pairFn
 	}
 	go f.Run(ctx)
+}
+
+func (p *Provider) WiFiDiscoveryError() error {
+	p.nmux.mu.Lock()
+	defer p.nmux.mu.Unlock()
+	if p.nmux.stop == nil || p.nmux.finder == nil {
+		return nil
+	}
+	if err := p.nmux.finder.Err(); err != nil {
+		return fmt.Errorf("Wi-Fi discovery failed (check local-network permission, firewall and VPN multicast filtering): %w", err)
+	}
+	return nil
 }
 
 // startMuxLocked starts the usbmuxd of its own and points go-ios at it.

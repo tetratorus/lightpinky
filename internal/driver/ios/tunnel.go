@@ -97,6 +97,31 @@ func OpenTunnel(ctx context.Context, entry goios.DeviceEntry) (*Tunnel, error) {
 
 // openTunnel is OpenTunnel asking the device for an MTU of mtu.
 func openTunnel(ctx context.Context, entry goios.DeviceEntry, mtu int) (*Tunnel, error) {
+	// A phone on the network drops the proxy connection while its heartbeat
+	// is not up yet (see netmux's heartbeat): try again briefly, so the
+	// first connection does not have to win that race.
+	attempts := 1
+	if entry.Properties.ConnectionType == "Network" {
+		attempts = 3
+	}
+	var err error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		var t *Tunnel
+		if t, err = openTunnelOnce(ctx, entry, mtu); err == nil {
+			return t, nil
+		}
+	}
+	return nil, err
+}
+
+func openTunnelOnce(ctx context.Context, entry goios.DeviceEntry, mtu int) (*Tunnel, error) {
 	conn, err := goios.ConnectToService(entry, coreDeviceProxy)
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", coreDeviceProxy, err)

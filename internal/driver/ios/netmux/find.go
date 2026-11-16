@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/json"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -19,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tetratorus/lightpinky/internal/mdns"
 	goios "github.com/danielpaulus/go-ios/ios"
+	"github.com/tetratorus/lightpinky/internal/mdns"
 )
 
 // ServiceType is the service an iPhone or iPad advertises on the network
@@ -94,6 +96,27 @@ type Finder struct {
 	ProbeFn  func(ctx context.Context, addr netip.Addr) bool
 	NowFn    func() time.Time
 	LocalFn  func() []netip.Addr // this computer's addresses
+
+	// StatePath keeps each listed phone's address so the search finds it
+	// again when its records pause: iOS 27.2 stops advertising
+	// _apple-mobdev2 for stretches, and a restarted search has no memory.
+	// "" for none.
+	StatePath string
+
+	mu       sync.Mutex
+	err      error
+}
+
+func (f *Finder) Err() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
+func (f *Finder) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
 }
 
 const (
@@ -153,7 +176,8 @@ func (f *Finder) interval() time.Duration {
 
 func newFindState(f *Finder, log *slog.Logger) *findState {
 	return &findState{f: f, log: log, pairs: map[string]pairEntry{}, failSince: map[string]time.Time{}, names: map[string]string{},
-		listed: map[string]netip.Addr{}, last: map[string]netip.Addr{}, seen: map[string]bool{}, probes: map[string]probeState{}}
+		listed: map[string]netip.Addr{}, last: map[string]netip.Addr{}, seen: map[string]bool{}, probes: map[string]probeState{},
+		saved: loadAddrs(f.StatePath)}
 }
 
 func (f *Finder) logOrDiscard() *slog.Logger {
@@ -177,6 +201,7 @@ type findState struct {
 	last      map[string]netip.Addr // the address a phone was last listed at, also once dropped
 	seen      map[string]bool       // found before
 	probes    map[string]probeState // by UDID: when lockdown is next asked
+	saved     map[string]netip.Addr // the address each phone was last listed at, kept in StatePath
 }
 
 // probeState is when lockdown on a phone is asked next, and what it said
@@ -214,12 +239,14 @@ func (s *findState) tick(ctx context.Context) {
 		}
 		src, err := browse()
 		if err != nil {
+			s.f.setErr(err)
 			s.srcErrAt = now
 			s.log.Warn("iphone: cannot look for iPhones and iPads on the network", "err", err)
 			return
 		}
 		s.src = src
 	}
+	s.f.setErr(s.src.Err())
 
 	// The pair records of the phones this computer paired with.
 	read := s.f.PairFn
@@ -271,6 +298,18 @@ func (s *findState) tick(ctx context.Context) {
 			s.log.Debug("netmux: a record names addresses no phone can have; skipped", "device", id, "addrs", refused)
 		}
 		addrs[id] = append(addrs[id], list...)
+	}
+	// A phone whose records pause (iOS 27.2 stops advertising _apple-mobdev2
+	// for stretches) is still asked about at the address it was last listed
+	// at; one the person removed is not, as it is in no UDIDs list.
+	udidSet := make(map[string]bool, len(udids))
+	for _, id := range udids {
+		udidSet[id] = true
+	}
+	for id, addr := range s.saved {
+		if udidSet[id] && len(addrs[id]) == 0 {
+			addrs[id] = []netip.Addr{addr}
+		}
 	}
 	// Where lockdown is asked about each phone. One listed on Wi-Fi is asked
 	// there, whatever its records say; another address they name is alt,
@@ -414,6 +453,21 @@ func (s *findState) tick(ctx context.Context) {
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].UDID < list[j].UDID })
 	s.f.Mux.SetPhones(list)
+
+	// Keep each listed phone's address for the next run and for the times
+	// its records pause; one that left is kept too, should it come back at
+	// the same address without announcing itself.
+	kept := maps.Clone(s.saved)
+	if kept == nil {
+		kept = map[string]netip.Addr{}
+	}
+	for id, addr := range next {
+		kept[id] = addr
+	}
+	if !maps.Equal(kept, s.saved) {
+		s.saved = kept
+		saveAddrs(s.f.StatePath, kept)
+	}
 }
 
 // nextProbe says when lockdown on a phone is asked again after it answered
@@ -639,4 +693,45 @@ func lockdownDir() string {
 		return filepath.Join(base, "Apple", "Lockdown")
 	}
 	return filepath.FromSlash("/var/lib/lockdown")
+}
+
+// loadAddrs reads the addresses StatePath keeps for the phones last listed
+// on Wi-Fi (saveAddrs); none for an empty path or a bad file.
+func loadAddrs(path string) map[string]netip.Addr {
+	out := map[string]netip.Addr{}
+	if path == "" {
+		return out
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var m map[string]string
+	if json.Unmarshal(b, &m) != nil {
+		return out
+	}
+	for id, s := range m {
+		if addr, err := netip.ParseAddr(s); err == nil {
+			out[id] = addr
+		}
+	}
+	return out
+}
+
+// saveAddrs writes path the address of each phone last listed on Wi-Fi.
+func saveAddrs(path string, m map[string]netip.Addr) {
+	if path == "" {
+		return
+	}
+	out := make(map[string]string, len(m))
+	for id, addr := range m {
+		out[id] = addr.String()
+	}
+	b, err := json.Marshal(out)
+	if err == nil {
+		err = os.MkdirAll(filepath.Dir(path), 0o700)
+	}
+	if err == nil {
+		err = os.WriteFile(path, b, 0o600)
+	}
 }

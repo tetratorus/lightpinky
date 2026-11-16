@@ -36,6 +36,20 @@ func (p *Provider) UseSavedPhones() {
 	}
 }
 
+// wifiStatePath is where the Finder keeps the last address of each phone
+// found on Wi-Fi (netmux.Finder.StatePath): beside PhonesFile, or in the
+// user cache when there is none.
+func (p *Provider) wifiStatePath() string {
+	if p.PhonesFile != "" {
+		return filepath.Join(filepath.Dir(p.PhonesFile), "wifi-phones.json")
+	}
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "lightpinky", "wifi-phones.json")
+}
+
 // savePhonesLocked adds the phones the person uses to PhonesFile. The
 // caller holds p.mu.
 func (p *Provider) savePhonesLocked() {

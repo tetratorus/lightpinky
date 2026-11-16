@@ -63,8 +63,8 @@ func (d *Device) Wake(ctx context.Context) error {
 }
 
 // Unlock implements driver.Unlocker. It wakes the screen, swipes up from
-// the bottom edge for the passcode pad, checks that the pad is showing,
-// types the passcode on the virtual keyboard, checking before each key that
+// the bottom edge for the passcode pad, then types the passcode on the
+// virtual keyboard, checking before each key that
 // the phone is still locked, presses Return unless the passcode is four or
 // six digits (those submit themselves), and returns nil once lockdown says
 // the phone is unlocked, or ErrLocked. It never types the passcode twice. A
@@ -75,15 +75,10 @@ func (d *Device) Unlock(ctx context.Context, pin string) error {
 
 // powerPhone is what waking and unlocking need from a phone; tests fake it.
 type powerPhone interface {
-	// freshAX drops the accessibility session and any failure kept from
-	// it, so the pad is looked for in a session made on the lock screen:
-	// one made before the phone locked may no longer see it.
-	freshAX()
 	screenOn(ctx context.Context) (bool, error)
 	locked(ctx context.Context) (bool, error)
 	pressHome(ctx context.Context) error
 	swipeUp(ctx context.Context) error
-	keypadShown(ctx context.Context) (bool, error)
 	pressKey(ctx context.Context, k keyStroke) error
 	sleep(ctx context.Context, d time.Duration) error
 }
@@ -91,21 +86,13 @@ type powerPhone interface {
 // Timing for waking and unlocking.
 const (
 	wakeWait    = 2 * time.Second        // for the screen to come on after Home
-	keypadWait  = 3 * time.Second        // for the passcode pad after each swipe
 	unlockWait  = 4 * time.Second        // for lockdown to report the unlock
 	powerPoll   = 150 * time.Millisecond // between checks
 	pinKeyGap   = 120 * time.Millisecond // between passcode keys
 	afterWake   = 500 * time.Millisecond // before the first swipe on a screen that just lit up
-	afterSwipe  = 600 * time.Millisecond // before looking for the pad
+	afterSwipe  = 600 * time.Millisecond // let the passcode screen settle
 	afterKeypad = 300 * time.Millisecond // before the first passcode key
 )
-
-// unlockSwipes is how many times Unlock swipes up for the passcode pad. A
-// lock screen with notifications can take the first swipe for its
-// notification list (seen once in the field, where a second try worked), and
-// one that has just lit up can miss it. A swipe on the lock screen types
-// nothing, so trying again uses no attempt.
-const unlockSwipes = 3
 
 func wake(ctx context.Context, p powerPhone) error {
 	_, err := wakeUp(ctx, p)
@@ -239,9 +226,8 @@ func unlock(ctx context.Context, p powerPhone, pin string) error {
 }
 
 // reachPad wakes the phone and brings up its passcode pad, typing nothing.
-// It reports unlocked when the phone needs no passcode after all: it was
-// not locked, or Face ID opened it on the way. An error wraps
-// ErrPINNotEntered once the phone was found locked.
+// Remote accessibility may not answer while locked, so it is not required
+// here. The caller checks lock state before every key and never retries input.
 func reachPad(ctx context.Context, p powerPhone) (unlocked bool, err error) {
 	woke, err := wakeUp(ctx, p)
 	if err != nil {
@@ -254,58 +240,20 @@ func reachPad(ctx context.Context, p powerPhone) (unlocked bool, err error) {
 	if !locked {
 		return true, nil
 	}
-	p.freshAX()
 	if woke {
 		// The lock screen takes a moment to come up behind the backlight.
 		if err := p.sleep(ctx, afterWake); err != nil {
 			return false, err
 		}
 	}
-	// Face ID can unlock the phone on the way, if its owner is there. A
-	// failed look for the pad is tried again in a new session.
-	var lookErr error
-	padOrOpen := func(c context.Context) (bool, error) {
-		l, err := p.locked(c)
-		if err != nil || !l {
-			unlocked = err == nil
-			return unlocked, err
-		}
-		shown, err := p.keypadShown(c)
-		if err != nil {
-			lookErr = err
-			p.freshAX()
-			return false, nil
-		}
-		return shown, nil
+	if err := p.swipeUp(ctx); err != nil {
+		return false, fmt.Errorf("unlock: %w: %w", err, driver.ErrPINNotEntered)
 	}
-	for swipe := 1; ; swipe++ {
-		if swipe > 1 {
-			// The screen may have gone dark while the pad was looked for.
-			if _, err := wakeUp(ctx, p); err != nil {
-				return false, fmt.Errorf("unlock: %w: %w", err, driver.ErrPINNotEntered)
-			}
-		}
-		if err := p.swipeUp(ctx); err != nil {
-			return false, fmt.Errorf("unlock: %w: %w", err, driver.ErrPINNotEntered)
-		}
-		if err := p.sleep(ctx, afterSwipe); err != nil {
-			return false, err
-		}
-		err := waitFor(ctx, p, keypadWait, padOrOpen, "the passcode pad did not appear")
-		if err == nil {
-			return unlocked, nil
-		}
-		if !errors.Is(err, errWaitedOut) || swipe == unlockSwipes {
-			if lookErr != nil {
-				err = fmt.Errorf("%v (last error: %v)", err, lookErr)
-			}
-			if errors.Is(err, errWaitedOut) {
-				err = fmt.Errorf("%v after %d swipes", err, swipe)
-			}
-			// Nothing was typed, so no attempt was used.
-			return false, fmt.Errorf("unlock: %v: %w", err, driver.ErrPINNotEntered)
-		}
+	if err := p.sleep(ctx, afterSwipe); err != nil {
+		return false, fmt.Errorf("unlock: %w: %w", err, driver.ErrPINNotEntered)
 	}
+	locked, err = p.locked(ctx)
+	return !locked, err
 }
 
 // devicePower is a Device as a powerPhone.
@@ -313,16 +261,6 @@ type devicePower struct{ d *Device }
 
 func (p devicePower) screenOn(ctx context.Context) (bool, error) { return p.d.ScreenOn(ctx) }
 
-func (p devicePower) freshAX() {
-	d := p.d
-	d.svcMu.Lock()
-	defer d.svcMu.Unlock()
-	if d.rax != nil {
-		d.rax.Close()
-		d.rax = nil
-	}
-	d.raxErr = nil
-}
 func (p devicePower) locked(ctx context.Context) (bool, error) { return p.d.Locked(ctx) }
 
 func (p devicePower) pressHome(ctx context.Context) error {
@@ -343,25 +281,7 @@ func (p devicePower) swipeUp(ctx context.Context) error {
 	return p.d.Swipe(ctx, screen.Point{X: x, Y: s.Height - 1}, screen.Point{X: x, Y: s.Height / 2}, 300*time.Millisecond)
 }
 
-// keypadShown looks for the passcode pad: buttons for all ten digits (their
-// labels start with the digit, "2, ABC", whatever the language), or a
-// secure text field for an alphanumeric passcode.
-func (p devicePower) keypadShown(ctx context.Context) (bool, error) {
-	rax, err := p.d.raxReady(ctx)
-	if err != nil {
-		return false, err
-	}
-	lim := p.d.walkLimits()
-	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), lim.Budget+raxRequestTimeout)
-	defer cancel()
-	els, _, err := rax.walk(c, lim)
-	if err != nil {
-		return false, err
-	}
-	return passcodePad(els), nil
-}
-
-// passcodePad reports whether elements include a passcode pad.
+// passcodePad is also used by the WebDriverAgent backend.
 func passcodePad(els []raxElement) bool {
 	var digits [10]bool
 	for _, e := range els {

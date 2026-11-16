@@ -48,6 +48,11 @@ func (ph *phones) discover(ctx context.Context) ([]driver.Info, error) {
 			}
 			return infos, nil
 		}
+		if p, ok := ph.p.(interface{ WiFiDiscoveryError() error }); ok && ph.wifi {
+			if err := p.WiFiDiscoveryError(); err != nil {
+				return nil, err
+			}
+		}
 		if time.Now().After(until) {
 			return []driver.Info{}, nil
 		}
@@ -163,7 +168,7 @@ func (ph *phones) openDevice(ctx context.Context, id string, interactive bool) (
 
 func connect(ctx context.Context, open func() (driver.Device, error)) (driver.Device, error) {
 	d, err := open()
-	if err == nil || !(errors.Is(err, io.EOF) || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "connection reset")) {
+	if err == nil || !(errors.Is(err, io.EOF) || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "connection reset") || strings.Contains(err.Error(), "broken pipe")) {
 		return d, err
 	}
 	select {
