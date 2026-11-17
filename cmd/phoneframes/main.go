@@ -98,93 +98,71 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer stream.Close()
 
 	out := bufio.NewWriterSize(os.Stdout, 1<<20)
 	defer out.Flush()
 
 	var lastEmit, lastLockCheck time.Time
+	var lastWidth, lastHeight int
 	locked := false
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
-	emit:
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-player.Done():
-				break emit
-			case <-tick.C:
-			}
-			if !player.Pending() || time.Since(lastEmit) < *interval {
-				continue
-			}
-			// The lock state costs a lockdown round trip; check it at most
-			// twice a second, and always before the first frame.
-			if time.Since(lastLockCheck) >= 500*time.Millisecond || lastEmit.IsZero() {
-				lastLockCheck = time.Now()
-				if lr, ok := d.(driver.LockReporter); ok {
-					if v, err := lr.Locked(ctx); err == nil {
-						locked = v
-					}
-				}
-			}
-			fr := player.Take()
-			if fr == nil || fr.Image == nil || locked {
-				continue
-			}
-			img := rotateRGBA(fr.Image, fr.Turn)
-			b := img.Bounds()
-			if len(img.Pix) != b.Dx()*b.Dy()*4 {
-				return fmt.Errorf("frame has unexpected pixel layout")
-			}
-			if _, err := fmt.Fprintf(out, "%d %d\n", b.Dx(), b.Dy()); err != nil {
-				return err
-			}
-			if _, err := out.Write(bgra(img.Pix)); err != nil {
-				return err
-			}
-			if err := out.Flush(); err != nil {
-				return err
-			}
-			lastEmit = time.Now()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-player.Done():
+			// A dead stream can leave the device's tunnel/session stale.
+			// Exit so the supervisor rediscovers and opens a fresh device.
+			return fmt.Errorf("video stream ended; reconnect with a fresh device: %v", player.Err())
+		case <-tick.C:
 		}
-		// The stream ended (the phone locked, the tunnel dropped): poll the
-		// lock state cheaply once a second and only pay for a stream reopen
-		// once the phone is actually unlocked. A failed reopen backs off to 5s.
-		if stream != nil {
-			stream.Close()
-			stream = nil
+		if !player.Pending() || time.Since(lastEmit) < *interval {
+			continue
 		}
-		backoff := time.Second
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(backoff):
-			}
+		// The lock state costs a lockdown round trip; check it at most
+		// twice a second, and always before the first frame.
+		if time.Since(lastLockCheck) >= 500*time.Millisecond || lastEmit.IsZero() {
+			lastLockCheck = time.Now()
 			if lr, ok := d.(driver.LockReporter); ok {
-				if v, err := lr.Locked(ctx); err == nil && v {
-					backoff = time.Second
-					continue
+				checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				v, err := lr.Locked(checkCtx)
+				cancel()
+				if err != nil {
+					return fmt.Errorf("check screen lock: %w", err)
 				}
+				locked = v
 			}
-			ns, np, oerr := openStream(ctx, d)
-			if oerr != nil {
-				backoff *= 2
-				if backoff > 5*time.Second {
-					backoff = 5 * time.Second
-				}
-				continue
-			}
-			stream, player = ns, np
-			break
 		}
+		fr := player.Take()
+		if fr == nil || fr.Image == nil || locked {
+			continue
+		}
+		img := rotateRGBA(fr.Image, fr.Turn)
+		b := img.Bounds()
+		if len(img.Pix) != b.Dx()*b.Dy()*4 {
+			return fmt.Errorf("frame has unexpected pixel layout")
+		}
+		if b.Dx() != lastWidth || b.Dy() != lastHeight {
+			fmt.Fprintf(os.Stderr, "phoneframes: recording %dx%d (clockwise quarter turns: %d)\n", b.Dx(), b.Dy(), fr.Turn)
+			lastWidth, lastHeight = b.Dx(), b.Dy()
+		}
+		if _, err := fmt.Fprintf(out, "%d %d\n", b.Dx(), b.Dy()); err != nil {
+			return err
+		}
+		if _, err := out.Write(bgra(img.Pix)); err != nil {
+			return err
+		}
+		if err := out.Flush(); err != nil {
+			return err
+		}
+		lastEmit = time.Now()
 	}
 }
 
 // openStream starts the device's live video and its player; the device
-// stays open across reconnects.
+// is reopened by the supervisor if the stream ends.
 func openStream(ctx context.Context, d driver.Device) (driver.Stream, *video.Player, error) {
 	stream, err := d.Stream(ctx, driver.StreamOptions{})
 	if err != nil {
