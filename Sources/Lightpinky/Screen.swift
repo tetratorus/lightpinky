@@ -93,7 +93,11 @@ struct Screen {
     let exact=elements.filter { matches($0,exact:true) }
     let candidates=exact.isEmpty ? elements.filter { matches($0,exact:false) } : exact
     let selected=index ?? 0
-    guard !candidates.isEmpty else { throw PhoneError("No element matches \(query)") }
+    guard !candidates.isEmpty else {
+      let app = (json["App"] as? [String: Any])?["Name"] as? String ?? "unknown app"
+      let state = json["Locked"] as? Bool == true ? ", phone locked" : ""
+      throw PhoneError("No element matches \(query) in \(app)\(state) (\(elements.count) elements read)")
+    }
     guard index != nil || candidates.count==1 else { throw PhoneError("Multiple elements match; use role or zero-based index") }
     guard selected>=0,selected<candidates.count else { throw PhoneError("Element index out of range") }
     let rect=candidates[selected]["Bounds"] as! [String:Int]

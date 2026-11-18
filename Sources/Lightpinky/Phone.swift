@@ -34,31 +34,44 @@ final class Phone {
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
   private var axSession: AccessibilitySession?
+  private var lockStateReader: LockStateReader?
   init(_ info: PhoneInfo) { self.info = info }
   deinit { axSession?.close() }
 
   private func nativeConnection() throws -> CoreConnection {
-    if let axConnection { return axConnection }
-    let connection = try CoreConnection(identifier:info.id)
+    if let axConnection, axConnection.isValid { return axConnection }
+    axSession?.close()
+    axSession = nil
+    lockStateReader = nil
+    hidConnection = nil
+    axConnection = nil
+    let connection = try CoreConnection(identifier:info.id, udid:info.udid)
     axConnection = connection
     return connection
   }
 
   func hid() throws -> HID {
+    let connection = try nativeConnection()
     if let hidConnection { return hidConnection }
-    let hid = HID(identifier:info.id,connection:try nativeConnection())
+    let hid = HID(connection:connection)
     hidConnection = hid
     return hid
   }
 
   func locked() throws -> Bool {
-    let result = try Command.device(["device", "info", "lockState"], id: info.id)
-    guard let locked = result["passcodeRequired"] as? Bool else { throw PhoneError("Lock state unavailable") }
-    return locked
+    let connection = try nativeConnection()
+    do {
+      if lockStateReader == nil { lockStateReader = try LockStateReader(connection: connection) }
+      return try lockStateReader!.locked()
+    } catch {
+      lockStateReader = nil
+      connection.invalidateDirectory()
+      throw error
+    }
   }
 
   func display() throws -> [String: Any] {
-    let result = try Command.device(["device", "info", "displays"], id: info.id)
+    let result = try nativeConnection().displayInfo()
     guard let displays = result["displays"] as? [[String: Any]],
           var display = displays.first(where: { $0["primary"] as? Bool == true }) else {
       throw PhoneError("No primary display")
@@ -69,7 +82,31 @@ final class Phone {
 
   func power() throws -> [String: Any] {
     let light = try display()["backlightState"] as? String ?? ""
-    return ["Locked": try locked(), "ScreenOn": ["on", "activeOn"].contains(light)]
+    return ["Locked": try locked(), "ScreenOn": ["on", "activeOn", "activeDimmed"].contains(light)]
+  }
+
+  func lock() throws {
+    _ = try nativeConnection()
+    let before = try power()
+    if before["Locked"] as? Bool == true && before["ScreenOn"] as? Bool == false { return }
+    // End the developer display/input session before putting the phone to
+    // sleep. Keeping it alive can compete with the side-button transition.
+    hidConnection = nil
+    // Consumer Power is the side button. Send it once, then verify instead
+    // of toggling it again if the reply is delayed.
+    try hid().button(usage: 0x30)
+    let deadline = ProcessInfo.processInfo.systemUptime + 6
+    var confirmedAt: Double?
+    repeat {
+      Thread.sleep(forTimeInterval: 0.15)
+      let state = try power()
+      if state["Locked"] as? Bool == true && state["ScreenOn"] as? Bool == false {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let confirmedAt, now - confirmedAt >= 0.5 { return }
+        if confirmedAt == nil { confirmedAt = now }
+      } else { confirmedAt = nil }
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    throw PhoneError("Lock button sent once, but the phone did not stay locked with its display off")
   }
 
   func wake() throws {
@@ -152,10 +189,21 @@ final class Phone {
   }
 
   func unlock() throws {
+    let started = ProcessInfo.processInfo.systemUptime
+    func trace(_ stage: String) {
+      guard ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" else { return }
+      let elapsed = ProcessInfo.processInfo.systemUptime - started
+      FileHandle.standardError.write(Data(String(format: "unlock %.3fs %@\n", elapsed, stage).utf8))
+    }
     // Explicit control must establish the paired developer connection before
     // querying a locked Wi-Fi phone. A passive lock-state query cannot do that.
     _ = try nativeConnection()
+    trace("connected")
+    // PasswordProtected briefly lags a side-button transition. An unlock
+    // must wake the display even if that first lock-state read says false.
+    try wake()
     if try !locked() { return }
+    trace("locked")
     // iOS can end the developer display session when the phone locks.
     // Recreate input services before beginning a new unlock attempt.
     hidConnection = nil
@@ -167,12 +215,16 @@ final class Phone {
       throw PhoneError("This native unlock implementation currently requires a numeric passcode")
     }
     try wake()
+    trace("awake")
     let input = try hid()
-    try input.gesture(from: CGPoint(x: 0.5, y: 0.9996), to: CGPoint(x: 0.5, y: 0.5), duration: 0.3)
+    try input.prepareKeyboard()
+    trace("keyboard ready")
+    if try !locked() { return }
+    try input.keys([0x28])
     Thread.sleep(forTimeInterval: 0.6)
     if try !locked() { return }
     func passcodeVisible() throws -> Bool {
-      let screen=try elements()
+      let screen=try elements(preferPush: true)
       let labels=screen.elements.compactMap { $0["Label"] as? String }
       if labels.contains(where: {
         let text=$0.lowercased()
@@ -193,11 +245,12 @@ final class Phone {
       return true
     }
     var ready = try passcodeVisible()
+    trace("screen inspected")
     if !ready {
-      // A keyboard Return presents authentication. Face ID can animate for
-      // several seconds before the numeric pad becomes visible.
+      // Fall back to the lock-screen swipe if Return did not present the pad.
+      // Face ID can animate before the numeric pad becomes visible.
       if try !locked() { return }
-      try input.keys([0x28])
+      try input.gesture(from: CGPoint(x: 0.5, y: 0.9996), to: CGPoint(x: 0.5, y: 0.5), duration: 0.3)
       let deadline = ProcessInfo.processInfo.systemUptime + 8
       repeat {
         Thread.sleep(forTimeInterval:0.5)
@@ -208,6 +261,7 @@ final class Phone {
     guard ready else {
       throw PhoneError("System passcode entry screen was not confirmed; no code was entered")
     }
+    trace("passcode screen confirmed")
     try input.prepareKeyboard()
     // From this point onward, never retry. Check lock state before each key so
     // a Face ID unlock cannot spill the rest of the code into the foreground app.
@@ -219,10 +273,11 @@ final class Phone {
         entered += 1
         Thread.sleep(forTimeInterval: 0.12)
       }
+      trace("input complete")
       if code.count != 4 && code.count != 6, try locked() { try input.keys([0x28]) }
       for _ in 0..<8 {
         Thread.sleep(forTimeInterval: 0.3)
-        if try !locked() { return }
+        if try !locked() { trace("unlocked"); return }
       }
     } catch {
       if entered > 0 {
@@ -286,6 +341,30 @@ final class Phone {
     return id
   }
 
+  func launchApp(_ name: String) throws {
+    let bundle = try appID(name)
+    // Wire format from go-ios ios/appservice/appservice.go (MIT; see NOTICE).
+    let options = try PropertyListSerialization.data(
+      fromPropertyList: [String: Any](), format: .binary, options: 0)
+    let result = try nativeConnection().invoke("com.apple.coredevice.appservice",
+      feature: "com.apple.coredevice.feature.launchapplication", input: [
+        "applicationSpecifier": ["bundleIdentifier": ["_0": bundle]],
+        "options": [
+          "arguments": [Any](), "environmentVariables": [String: Any](),
+          "platformSpecificOptions": options,
+          "standardIOUsesPseudoterminals": true, "startStopped": false,
+          "terminateExisting": false, "user": ["active": true],
+          "workingDirectory": NSNull(),
+        ],
+        "standardIOIdentifiers": [String: Any](),
+      ])
+    guard let output = CoreConnection.object(result) as? [String: Any],
+          let process = output["processToken"] as? [String: Any],
+          let pid = process["processIdentifier"] as? NSNumber, pid.intValue > 0 else {
+      throw PhoneError("App launch did not return a process identifier")
+    }
+  }
+
   func stopApp(_ name: String) throws {
     let id = try appID(name)
     guard let app = try apps().first(where: { $0["bundleIdentifier"] as? String == id }),
@@ -302,21 +381,24 @@ final class Phone {
     }
   }
 
-  func elements() throws -> Screen {
+  func elements(preferPush: Bool = false) throws -> Screen {
     // Only observation is repeated. Input tools never replay a gesture or
     // passcode after a timeout.
     for attempt in 0..<2 {
       do {
+        let connection = try nativeConnection()
         if axSession == nil {
-          let connection = try nativeConnection()
           let socket = try connection.socket("com.apple.accessibility.axAuditDaemon.remoteAXService")
           axSession = try AccessibilitySession(socket:socket)
         }
-        return try Screen(responses:axSession!.tree(),scale:display()["scale"] as? Double ?? 3,locked:locked())
+        return try Screen(responses:axSession!.tree(preferPush: preferPush),scale:display()["scale"] as? Double ?? 3,locked:locked())
       } catch {
         axSession?.close()
         axSession=nil
         guard attempt==0, let failure=error as? AccessibilityFailure else { throw error }
+        // A foreground app transition can invalidate an AX object (error 8).
+        // Restart observation from the new foreground app, never replay input.
+        if case .rejected(let code) = failure, code != 8 { throw error }
         if case .disconnected = failure { axConnection?.invalidateDirectory() }
       }
     }

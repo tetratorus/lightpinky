@@ -2,12 +2,14 @@ import Foundation
 
 final class Tools {
   private var phones: [String: Phone] = [:]
-  func shutdown() { phones.removeAll() }
+  private var defaultPhone: Phone?
+  func shutdown() { defaultPhone = nil; phones.removeAll() }
   static let descriptions: [String: String] = [
     "devices": "List paired iPhones known to macOS CoreDevice.",
     "download_disk_image": "Prepare Apple's developer services using the DDI installed by Xcode.",
     "power": "Read lock and display state; wake:true explicitly wakes the screen.",
     "unlock": "Wake and unlock using IPHONE_UNLOCK_CODE from the server environment. Never retries passcode input.",
+    "lock": "Lock the iPhone with one side-button press and verify locked state. Already locked and asleep is a no-op.",
     "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor.",
     "elements": "Read the foreground application's native accessibility tree. json:true returns the full structure.",
     "tap": "Tap or long-press in screenshot pixels, or find an element by label or identifier. Use role or zero-based index to disambiguate.",
@@ -53,13 +55,18 @@ final class Tools {
 
   func phone(_ requested: String?) throws -> Phone {
     if let requested, let phone = phones[requested] { return phone }
+    if requested == nil, let defaultPhone { return defaultPhone }
     let available = try PhoneInfo.discover()
     let matching = requested.map { key in available.filter { $0.id == key || $0.udid == key || $0.name == key } } ?? available
     guard matching.count == 1 else { throw PhoneError("Choose a device from devices (found \(matching.count) matching iPhones)") }
     let info = matching[0]
-    if let phone = phones[info.id] { return phone }
+    if let phone = phones[info.id] {
+      if requested == nil { defaultPhone = phone }
+      return phone
+    }
     let phone = Phone(info)
     phones[info.id] = phone; phones[info.udid] = phone
+    if requested == nil { defaultPhone = phone }
     return phone
   }
 
@@ -99,13 +106,18 @@ final class Tools {
       guard let value = args[key] as? String else { throw PhoneError("\(key) must be a string") }
       return value
     }
-    if name == "devices" { return try Self.text(PhoneInfo.discover().map(\.json)) }
+    if name == "devices" {
+      let available = try PhoneInfo.discover()
+      defaultPhone = available.count == 1 ? phones[available[0].id] : nil
+      return try Self.text(available.map(\.json))
+    }
     let phone = try phone(args["device"] as? String)
     switch name {
     case "power":
       if args["wake"] as? Bool == true { try phone.wake() }
       return try Self.text(phone.power())
     case "unlock": try phone.unlock()
+    case "lock": try phone.lock()
     case "download_disk_image": _ = try phone.hid()
     case "screenshot":
       let size = try number("max_size")
@@ -132,7 +144,7 @@ final class Tools {
     case "key": try phone.key(string("key"))
     case "apps": return try Self.text(phone.apps())
     case "launch":
-      _ = try Command.device(["device","process","launch",phone.appID(string("app"))],id:phone.info.id)
+      try phone.launchApp(string("app"))
     case "stop_app":
       try phone.stopApp(string("app"))
     case "open_link": try phone.openURL(string("url"),app:args["app"] as? String)

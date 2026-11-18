@@ -4,10 +4,12 @@ import AppleBridge
 enum AccessibilityFailure: LocalizedError {
   case disconnected
   case timeout(String)
+  case rejected(Int)
   var errorDescription:String? {
     switch self {
     case .disconnected: return "Accessibility connection closed"
     case .timeout(let stage): return "Accessibility \(stage) timed out"
+    case .rejected(let code): return "Accessibility returned error \(code)"
     }
   }
 }
@@ -25,7 +27,10 @@ final class AccessibilitySession {
   private var waitingID: UInt32?
   private var rpcResult: Any?
   private var waitingType: Int?
+  private var waitingObject: String?
   private var axResult: [String:Any]?
+  private var pushedTree: [[String: Any]]?
+  private var pushedAt: Double = 0
   private let limit = 20 * 1024 * 1024
 
   init(socket: FileHandle) throws {
@@ -195,7 +200,17 @@ final class AccessibilitySession {
             throw PhoneError("AX response decode failed: \(error?.debugDescription ?? "invalid archive")")
           }
           condition.lock()
-          if result["type"] as? Int == waitingType, (result["notification"] as? Int ?? 0)==0 {
+          if let payload = result["result"] as? [String: Any],
+             let dump = payload["treeDump"] as? [[String: Any]] {
+            pushedTree = dump
+            pushedAt = ProcessInfo.processInfo.systemUptime
+            condition.broadcast()
+            // A pushed tree can carry the same request type as an active
+            // attribute read. It is not that read's response.
+            condition.unlock()
+            continue
+          }
+          if Self.isReply(result, type: waitingType, object: waitingObject) {
             axResult=result
             condition.broadcast()
           }
@@ -233,16 +248,72 @@ final class AccessibilitySession {
   private func request(_ type: Int,object:[String:Any]? = nil,parameters:[String:Any]? = nil) throws -> [String:Any] {
     var error:NSError?
     guard let data=LPAXRequestData(UInt(type),object,parameters,&error) else { throw error ?? PhoneError("Cannot encode accessibility request") as NSError }
-    condition.lock(); waitingType=type; axResult=nil; condition.unlock()
+    condition.lock(); waitingType=type; waitingObject=object.map(Self.objectKey); axResult=nil; condition.unlock()
     try call("processDataFromHost:",args:[data])
     let response=try wait(seconds:3,ax:true) as! [String:Any]
-    guard (response["error"] as? Int ?? 0)==0 else { throw PhoneError("Accessibility returned error \(response["error"]!)") }
+    let code = response["error"] as? Int ?? 0
+    guard code == 0 else { throw AccessibilityFailure.rejected(code) }
     return response
   }
 
-  func tree() throws -> [[String:Any]] {
+  private static func objectKey(_ object: [String: Any]) -> String {
+    "\(object["pid"] ?? ""):\(object["id"] ?? "")"
+  }
+
+  static func isReply(_ response: [String: Any], type: Int?, object: String?) -> Bool {
+    guard let type, response["type"] as? Int == type,
+          (response["notification"] as? Int ?? 0) == 0,
+          (response["result"] as? [String: Any])?["treeDump"] == nil else { return false }
+    if let object, let actual = response["object"] as? [String: Any] {
+      return objectKey(actual) == object
+    }
+    return true
+  }
+
+  static func orderedTree(_ dump: [[String: Any]], front: [String: Any]) -> [[String: Any]]? {
+    let key = Self.objectKey
+    guard let app = front["result"] as? [String: Any],
+          let dumpedApp = dump.first(where: { $0["type"] as? Int == 4 })?["result"] as? [String: Any],
+          key(app) == key(dumpedApp) else { return nil }
+    var attributes: [String: [String: Any]] = [:]
+    for item in dump where item["type"] as? Int == 5 && (item["error"] as? Int ?? 0) == 0 {
+      if let object = item["object"] as? [String: Any] { attributes[key(object)] = item }
+    }
+    var result = [front], stack = [(app, 0)], seen = Set<String>()
+    while let (object, depth) = stack.popLast() {
+      guard depth <= 40, seen.insert(key(object)).inserted else { continue }
+      guard let response = attributes[key(object)], let values = response["result"] as? [String: Any] else {
+        return nil // An incomplete push must fall back to a live walk.
+      }
+      result.append(response)
+      guard result.count <= 401 else { return nil }
+      let children = (values["9"] as? [[String: Any]]) ?? (values["8"] as? [[String: Any]]) ?? []
+      for child in children.reversed() { stack.append((child, depth + 1)) }
+    }
+    return result.count > 1 ? result : nil
+  }
+
+  func tree(preferPush: Bool = false) throws -> [[String:Any]] {
     let front=try request(4)
     guard let app=front["result"] as? [String:Any], app["id"] != nil else { throw PhoneError("No foreground accessibility application") }
+    if preferPush {
+      // iOS sends a complete tree after enabling accessibility or changing
+      // screens. Use only a fresh, complete push for the same foreground app.
+      let deadline = Date(timeIntervalSinceNow: 1.2)
+      condition.lock()
+      while !closed && failure == nil {
+        if ProcessInfo.processInfo.systemUptime - pushedAt <= 0.5,
+           let pushedTree, let result = Self.orderedTree(pushedTree, front: front) {
+          condition.unlock()
+          if ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" {
+            FileHandle.standardError.write(Data("accessibility: fresh pushed tree\n".utf8))
+          }
+          return result
+        }
+        if !condition.wait(until: deadline) { break }
+      }
+      condition.unlock()
+    }
     var responses=[front], stack:[([String:Any],Int)]=[(app,0)], seen=Set<String>()
     let deadline=ProcessInfo.processInfo.systemUptime+8
     let attributes=[8,9,21,33,53,26,25,61,77,27,30,28,42,64,32,66,69,45]

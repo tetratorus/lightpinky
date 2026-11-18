@@ -1,7 +1,7 @@
 # lightpinky development
 
 - Runtime: `Package.swift` and `Sources/`, built with `swift build -c release` using full Xcode on this Apple silicon Mac. No Go sidecars or downloaded toolchains.
-- Run the release build and `python3 -m unittest discover -s scripts -p 'test_*.py'`. Verify behavior on the paired phone; private Apple API changes require live checks.
+- Run `swift test -c release` and `python3 -m unittest discover -s scripts -p 'test_*.py'`. Verify behavior on the paired phone; private Apple API changes require live checks.
 - `python3 scripts/setup.py` builds and atomically installs the Swift executable. `scripts/phone tools` discovers the current MCP schemas.
 - CoreDevice owns pairing, developer services and the Wi-Fi tunnel. Discovery is passive; explicit wake/unlock may open a paired, locked phone.
 - Accessibility resolves `remoteAXService`'s TCP port with a receive-only RSD handshake over macOS's tunnel (`ServiceDirectory.swift`); never send a second host handshake, which rotates and closes service ports on iOS 27.2+.

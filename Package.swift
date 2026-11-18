@@ -13,5 +13,6 @@ let package = Package(
         .unsafeFlags(["-F/Library/Developer/PrivateFrameworks", "-framework", "CoreDevice",
                       "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/PrivateFrameworks"]),
       ]),
+    .testTarget(name: "LightpinkyTests", dependencies: ["Lightpinky"]),
   ]
 )

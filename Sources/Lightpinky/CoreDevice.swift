@@ -15,6 +15,9 @@ extension CoreObject {
   @_silgen_name("$s10CoreDevice06RemoteB0C06createC13XPCConnection14toServiceNamed14connectionMode16handlingEventsOn010completingM010completionySS_s6UInt64VSo17OS_dispatch_queueCAMSgys6ResultOySo0q12_xpc_remote_I0Cs5Error_pGctFTj")
   func connect(_ service: String, _ mode: UInt64, _ events: DispatchQueue, _ completionQueue: DispatchQueue?,
                _ completion: @escaping (Result<AnyObject, Error>) -> Void)
+
+  @_silgen_name("$s10CoreDevice0B14UsageAssertionC27registerInvalidationHandler15invokingOnQueue7handlerySo17OS_dispatch_queueCSg_ys5Error_pSgctFTj")
+  func onInvalidation(_ queue: DispatchQueue?, _ handler: @escaping (Error?) -> Void)
 }
 
 @_silgen_name("$s10CoreDevice0B7ManagerC6sharedACvgZ")
@@ -35,16 +38,30 @@ struct PhoneError: LocalizedError {
 }
 
 final class CoreConnection {
+  // RemoteXPC reports disconnects on its callback queue. Input is never
+  // replayed; the next tool call can create a fresh connection instead.
+  private let stateLock = NSLock()
+  private var disconnected = false
+  var isValid: Bool {
+    stateLock.lock(); defer { stateLock.unlock() }
+    return !disconnected
+  }
+  private func invalidate() {
+    stateLock.lock(); disconnected = true; stateLock.unlock()
+  }
   let device: CoreObject
   private let identifier: String
+  private let udid: String
   private var assertion: CoreObject?
   private let queue = DispatchQueue(label: "lightpinky.coredevice")
   private var channels: [String: AnyObject] = [:]
   private var directServices: [String:UInt16]?
   private var peerIP: String?
+  private var directoryPort: UInt16?
 
-  init(identifier: String) throws {
+  init(identifier: String, udid: String) throws {
     self.identifier = identifier
+    self.udid = udid
     guard let id = UUID(uuidString: identifier) else { throw PhoneError("Invalid CoreDevice UUID") }
     let manager = coreManager()
     let deadline = ProcessInfo.processInfo.systemUptime + 8
@@ -55,7 +72,11 @@ final class CoreConnection {
     } while found == nil && ProcessInfo.processInfo.systemUptime < deadline
     guard let found else { throw PhoneError("CoreDevice has not discovered \(identifier)") }
     device = found
-    var preparedness: UInt = 15
+    // Developer mode (1) and DDI services (2). Neither extended hardware
+    // information (4) nor a MobileDevice power assertion (8) is needed to
+    // control these services. AMDevicePowerAssertionCreate can wedge over
+    // Wi-Fi and invalidate an otherwise working tunnel.
+    var preparedness: UInt = 3
     var options = withUnsafePointer(to: &preparedness) { coreOptions($0) }
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<CoreObject, Error>?
@@ -70,18 +91,25 @@ final class CoreConnection {
       throw PhoneError("CoreDevice connection timed out")
     }
     assertion = try result!.get()
+    // CoreDevice can replace the tunnel without delivering a RemoteXPC error
+    // to every service channel. Its usage assertion is the lifetime authority.
+    assertion!.onInvalidation(queue) { [weak self] _ in self?.invalidate() }
   }
 
   func channel(_ service: String) throws -> AnyObject {
+    guard isValid else { throw PhoneError("CoreDevice connection ended; input was not retried") }
     if let cached = channels[service] { return cached }
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<AnyObject, Error>?
     device.connect(service, 0, queue, queue) { value in result = value; semaphore.signal() }
     guard semaphore.wait(timeout: .now() + 10) == .success else {
+      invalidate()
       throw PhoneError("CoreDevice service \(service) timed out")
     }
     let connection = try result!.get()
-    LPRemoteActivate(connection) { _ in }
+    LPRemoteActivate(connection) { [weak self] event in
+      if xpc_get_type(event) == XPC_TYPE_ERROR { self?.invalidate() }
+    }
     channels[service] = connection
     return connection
   }
@@ -91,6 +119,7 @@ final class CoreConnection {
   }
 
   func socket(_ service: String) throws -> FileHandle {
+    guard isValid else { throw PhoneError("CoreDevice connection ended") }
     guard let port=try discoverServices()[service],let peerIP else {
       throw PhoneError("The phone did not advertise \(service)")
     }
@@ -99,25 +128,63 @@ final class CoreConnection {
     return FileHandle(fileDescriptor:fd,closeOnDealloc:true)
   }
 
+  func tunnelAddress() throws -> String {
+    guard isValid else { throw PhoneError("CoreDevice connection ended") }
+    if let peerIP { return peerIP }
+    // Read macOS's local tunnel metadata. devicectl "details" also queries the
+    // phone and can block startup even while its tunnel is already connected.
+    func remote(_ arguments: [String]) throws -> String {
+      String(decoding: try Command.run(arguments, timeout: 3,
+        executable: "/usr/libexec/remotectl"), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    var interface: String?
+    for line in try remote(["list"]).split(separator: "\n") {
+      let fields = line.split(whereSeparator: \.isWhitespace)
+      guard fields.count > 1, fields[1].hasPrefix("coredevice-") else { continue }
+      let id = String(fields[0])
+      if try remote(["get-property", id, "UniqueDeviceID"]) == udid {
+        interface = try remote(["get-property", id, "InterfaceName"])
+        break
+      }
+    }
+    guard let interface, !interface.isEmpty else {
+      throw PhoneError("macOS has no connected tunnel for the selected phone")
+    }
+    let topology = String(decoding: try Command.run(
+      ["-m","tcp","-p","remoted","-L","1","-n"], executable: "/usr/bin/nettop"), as: UTF8.self)
+    for line in topology.split(separator: "\n") {
+      let fields = line.split(separator: ",", omittingEmptySubsequences: false)
+      guard fields.count > 3, fields[2] == interface, fields[3] == "Established",
+            let range = fields[1].range(of: "<->") else { continue }
+      let endpoint = fields[1][range.upperBound...]
+      guard let dot = endpoint.lastIndex(of: "."),
+            let port = UInt16(endpoint[endpoint.index(after: dot)...]), port > 0 else { continue }
+      let peer = String(endpoint[..<dot])
+      peerIP = peer
+      directoryPort = port
+      return peer
+    }
+    throw PhoneError("macOS has no active Remote Service Discovery connection to this phone")
+  }
+
+  func displayInfo() throws -> [String: Any] {
+    let output = try invoke("com.apple.coredevice.deviceinfo",
+      feature: "com.apple.coredevice.feature.getdisplayinfo", input: [:])
+    guard let result = Self.object(output) as? [String: Any] else {
+      throw PhoneError("Invalid native display information")
+    }
+    return result
+  }
+
   func discoverServices() throws -> [String:UInt16] {
     if let directServices { return directServices }
-    let details = try Command.device(["device","info","details"],id:identifier)
-    guard let transport = details["connectionProperties"] as? [String: Any],
-          let peer = transport["tunnelIPAddress"] as? String else { throw PhoneError("CoreDevice tunnel address unavailable") }
-    peerIP = peer
-    let topology = String(decoding:try Command.run(["-m","tcp","-p","remoted","-L","1","-n"],
-      executable:"/usr/bin/nettop"),as:UTF8.self)
-    let remotePrefix = "<->\(peer)."
-    let port: UInt16? = topology.split(separator:"\n").compactMap { line in
-      guard let range = line.range(of:remotePrefix) else { return nil }
-      return UInt16(line[range.upperBound...].prefix(while: \.isNumber))
-    }.first
-    guard let port else { throw PhoneError("macOS has no active Remote Service Discovery connection to this phone") }
+    let peer = try tunnelAddress()
+    guard let port = directoryPort else { throw PhoneError("Service-directory port unavailable") }
     let handshake=try ServiceDirectory(peer:peer,port:port).read()
     guard let services=handshake["Services"] as? [String:[String:Any]],
           let properties=handshake["Properties"] as? [String:Any],
-          let udid=properties["UniqueDeviceID"] as? String,
-          try PhoneInfo.discover().contains(where: { $0.id==identifier && $0.udid==udid }) else {
+          properties["UniqueDeviceID"] as? String == udid else {
       throw PhoneError("Service directory does not match the selected phone")
     }
     let ports=services.compactMapValues { value -> UInt16? in
@@ -131,6 +198,7 @@ final class CoreConnection {
   func invalidateDirectory() {
     directServices=nil
     peerIP=nil
+    directoryPort=nil
   }
 
   func request(_ service: String, _ dictionary: [String: Any]) throws -> xpc_object_t {
@@ -141,9 +209,13 @@ final class CoreConnection {
       semaphore.signal()
     }
     guard semaphore.wait(timeout: .now() + 8) == .success, let response else {
+      invalidate()
       throw PhoneError("CoreDevice service request timed out; input was not retried")
     }
-    if xpc_get_type(response) == XPC_TYPE_ERROR { throw PhoneError("CoreDevice service disconnected") }
+    if xpc_get_type(response) == XPC_TYPE_ERROR {
+      invalidate()
+      throw PhoneError("CoreDevice service disconnected; input was not retried")
+    }
     if xpc_dictionary_get_value(response, "error") != nil { throw PhoneError("CoreDevice rejected the service request") }
     return response
   }
@@ -185,12 +257,34 @@ final class CoreConnection {
     case let value as UInt64: return xpc_uint64_create(value)
     case let value as Int64: return xpc_int64_create(value)
     case let value as Bool: return xpc_bool_create(value)
+    case is NSNull: return xpc_null_create()
     case let values as [Any]:
       let object = xpc_array_create(nil, 0)
       for value in values { xpc_array_append_value(object, xpc(value)) }
       return object
     default: preconditionFailure("Unsupported XPC value \(type(of: value))")
     }
+  }
+
+  static func object(_ value: xpc_object_t) -> Any {
+    let type = xpc_get_type(value)
+    if type == XPC_TYPE_DICTIONARY {
+      var result: [String: Any] = [:]
+      xpc_dictionary_apply(value) { key, child in
+        result[String(cString: key)] = object(child)
+        return true
+      }
+      return result
+    }
+    if type == XPC_TYPE_ARRAY {
+      return (0..<xpc_array_get_count(value)).map { object(xpc_array_get_value(value, $0)) }
+    }
+    if type == XPC_TYPE_STRING, let string = xpc_string_get_string_ptr(value) { return String(cString: string) }
+    if type == XPC_TYPE_BOOL { return xpc_bool_get_value(value) }
+    if type == XPC_TYPE_INT64 { return xpc_int64_get_value(value) }
+    if type == XPC_TYPE_UINT64 { return xpc_uint64_get_value(value) }
+    if type == XPC_TYPE_DOUBLE { return xpc_double_get_value(value) }
+    return NSNull()
   }
 
   deinit {

@@ -3,7 +3,6 @@ import AppleBridge
 
 final class HID {
   private let connection: CoreConnection
-  private let identifier: String
   private var keyboard: UInt64?
   private var media: Media?
   // Connections can outlive an HID wrapper (notably across unlock attempts).
@@ -12,8 +11,7 @@ final class HID {
   private let universal = "com.apple.coredevice.hid.universalhidservice"
   private let indigo = "com.apple.coredevice.hid.indigo"
 
-  init(identifier: String, connection: CoreConnection) {
-    self.identifier = identifier
+  init(connection: CoreConnection) {
     self.connection = connection
   }
 
@@ -42,7 +40,7 @@ final class HID {
   }
 
   private func contact(_ point: CGPoint, down: Bool) throws {
-    if media == nil { media = try Media(connection:connection,identifier:identifier) }
+    if media == nil { media = try Media(connection:connection) }
     let x = UInt16((min(1, max(0, point.x)) * 65535).rounded())
     let y = UInt16((min(1, max(0, point.y)) * 65535).rounded())
     var data = Data(repeating: 0, count: 58)
@@ -68,7 +66,7 @@ final class HID {
   }
 
   func prepareKeyboard() throws {
-    if media == nil { media = try Media(connection:connection,identifier:identifier) }
+    if media == nil { media = try Media(connection:connection) }
     if keyboard != nil { return }
     let id: UInt64 = 0x100002001
     let descriptor = Data([

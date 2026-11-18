@@ -46,6 +46,18 @@ Explicit wake/unlock opens the paired developer connection and uses the system p
 
 Calls share a background server and its device connections. It listens on a private Unix socket under `~/.cache/lightpinky/run/`, restarts when the binary changes, and exits after 15 minutes without calls (`LIGHTPINKY_IDLE=5m` changes that). `scripts/phone stop` ends it; `LIGHTPINKY_DAEMON=0` runs a fresh server for one invocation. `LIGHTPINKY_DEVICE=<UDID>` supplies the default device.
 
+The default phone selection is retained within a server session, avoiding repeated discovery for each command. Calling `devices` refreshes discovery and clears that selection if more than one phone is present. CoreDevice invalidations and service failures discard cached connections before the next operation; input is never replayed automatically.
+
+`lock` ends the developer display session, sends the side button once, and waits for a stable locked state with the screen off. `unlock` wakes the display before checking whether authentication is needed, verifies an empty system passcode field, and checks live lock state before each digit.
+
+Lock and display checks reuse native connections. Lock state comes from the trusted lockdown service over Apple's existing tunnel because this phone's developer image does not implement the advertised `getlockstate` action. Fresh accessibility tree pushes can shorten passcode readiness checks; incomplete or old pushes fall back to reading the tree. Unsolicited updates are kept separate from individual element replies.
+
+Developer preparation requests only Developer Mode and DDI services. It avoids the legacy MobileDevice power assertion: `AMDevicePowerAssertionCreate` has been observed hanging over Wi-Fi and invalidating otherwise usable sessions. App launch also uses the existing native app-service connection instead of starting a separate `devicectl` process.
+
+For startup and unlock timing diagnostics, run `LIGHTPINKY_DAEMON=0 LIGHTPINKY_TIMING=1 scripts/phone unlock`. Stage timings go to stderr; they contain no passcode or screen content.
+
+If both lightpinky and `xcrun devicectl device info lockState --device <UDID> --timeout 10` fail with “Client unable to receive tunnel handshake response,” the system tunnel has not opened. In one observed failure, unlocking the phone and restarting the Mac's developer services did not recover it; turning Wi-Fi off and on in the iPhone's Settings did. The original trigger remains unidentified. A successful build or device listing does not verify recovery: check remote lock/unlock and control afterward.
+
 For example, `scripts/phone unlock apps` lists app names and bundle IDs; `scripts/phone unlock 'launch={"app":"Settings"}' elements` opens Settings and reads its screen. Discover coordinates through `elements` or `screenshot` rather than assuming them.
 
 ### Use as an MCP server
@@ -62,9 +74,10 @@ The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/l
 
 | Tool | What it does |
 |---|---|
-| `devices` | Phones this Mac sees, their state, and what a phone that is not online waits for |
+| `devices` | Paired iPhones known to macOS CoreDevice |
 | `download_disk_image` | Prepare developer services supplied by Xcode |
 | `unlock` | Wake and unlock using the server's `IPHONE_UNLOCK_CODE`, including over Wi-Fi |
+| `lock` | Send the side button once and verify a stable locked state with the display off; already locked and asleep is a no-op |
 | `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by |
 | `elements` | App in front, lock/keyboard state, then one line per element: role, label, id, center `@x,y`, bounds, states. `json` returns the full structure |
 | `tap` | Tap or long-press `x`, `y`, or match `find` with optional `role` and zero-based `index` |
@@ -91,6 +104,7 @@ It can enter a configured passcode on the system unlock screen. It cannot pass F
 
 ```sh
 swift build -c release
+swift test -c release
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 

@@ -11,11 +11,9 @@ final class Media {
   private var timer: DispatchSourceTimer?
   private var started = false
 
-  init(connection: CoreConnection, identifier: String) throws {
+  init(connection: CoreConnection) throws {
     self.connection = connection
-    let details = try Command.device(["device","info","details"],id:identifier)
-    guard let transport = details["connectionProperties"] as? [String: Any],
-          let peer = transport["tunnelIPAddress"] as? String else { throw PhoneError("CoreDevice tunnel address unavailable") }
+    let peer = try connection.tunnelAddress()
     var host = [CChar](repeating:0,count:46), port: UInt16 = 0
     fd = LPMediaSocket(peer,&host,&port)
     guard fd >= 0 else { throw PhoneError("Cannot bind to macOS's CoreDevice tunnel: \(errno)") }
@@ -35,7 +33,7 @@ final class Media {
     reader = packets
     do {
       let began = ProcessInfo.processInfo.systemUptime
-      let display = try Command.device(["device","info","displays"],id:identifier)
+      let display = try connection.displayInfo()
       let displays = display["displays"] as? [[String:Any]] ?? []
       let displayID = (displays.first(where: { $0["primary"] as? Bool == true })?["displayId"] as? NSNumber)?.int64Value ?? 1
       let response = try connection.invoke(service,feature:"com.apple.coredevice.feature.startmediastream",
@@ -70,7 +68,7 @@ final class Media {
       }
       Thread.sleep(forTimeInterval:max(0,0.5 - (ProcessInfo.processInfo.systemUptime - began)))
     } catch {
-      if started {
+      if started && connection.isValid {
         _ = try? connection.invoke(service,feature:"com.apple.coredevice.feature.stopmediastream",
           action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
       }
@@ -81,7 +79,7 @@ final class Media {
   }
 
   deinit {
-    if started {
+    if started && connection.isValid {
       _ = try? connection.invoke(service,feature:"com.apple.coredevice.feature.stopmediastream",
         action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
     }
