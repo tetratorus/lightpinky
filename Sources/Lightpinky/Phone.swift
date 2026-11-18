@@ -34,7 +34,6 @@ public final class Phone {
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
   private var axSession: DTXSession?
-  private var lockStateReader: LockStateReader?
   public init(_ info: PhoneInfo) { self.info = info }
   deinit { axSession?.close() }
 
@@ -42,7 +41,6 @@ public final class Phone {
     if let axConnection, axConnection.isValid { return axConnection }
     axSession?.close()
     axSession = nil
-    lockStateReader = nil
     hidConnection = nil
     axConnection = nil
     let connection = try CoreConnection(identifier:info.id, udid:info.udid)
@@ -59,20 +57,7 @@ public final class Phone {
   }
 
   func locked() throws -> Bool {
-    for attempt in 0..<2 {
-      let connection = try nativeConnection()
-      do {
-        if lockStateReader == nil { lockStateReader = try LockStateReader(connection: connection) }
-        return try lockStateReader!.locked()
-      } catch {
-        lockStateReader = nil
-        connection.invalidateDirectory()
-        // Reconnect a stalled read once, including during post-unlock
-        // verification. Only GetValue is repeated, never keyboard input.
-        guard attempt == 0, error is LockStateTransportFailure else { throw error }
-      }
-    }
-    throw PhoneError("Lock state unavailable")
+    try nativeConnection().locked()
   }
 
   func display() throws -> [String: Any] {
@@ -118,28 +103,22 @@ public final class Phone {
     _ = try nativeConnection()
     if try power()["ScreenOn"] as? Bool == true { return }
     try hid().button(usage: 0x40)
-    Thread.sleep(forTimeInterval: 0.6)
-    guard try power()["ScreenOn"] as? Bool == true else { throw PhoneError("Wake sent but the display stayed off") }
+    let deadline = ProcessInfo.processInfo.systemUptime + 6
+    repeat {
+      Thread.sleep(forTimeInterval: 0.15)
+      if try power()["ScreenOn"] as? Bool == true { return }
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    throw PhoneError("Wake sent once, but the display did not turn on")
   }
 
   public func screenshot() throws -> CGImage {
-    for attempt in 0..<2 {
-      let connection = try nativeConnection()
-      do {
-        let socket = try connection.socket("com.apple.instruments.dtservicehub")
-        let session = try DTXSession(socket:socket,accessibility:false)
-        defer { session.close() }
-        let encoded = try session.screenshotData()
-        guard let source = CGImageSourceCreateWithData(encoded as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0,
-                [kCGImageSourceShouldCacheImmediately:true] as CFDictionary) else { throw PhoneError("Cannot decode screenshot") }
-        return image
-      } catch {
-        connection.invalidateDirectory()
-        guard attempt == 0, error is AccessibilityFailure else { throw error }
-      }
+    let encoded=try nativeConnection().screenshotData()
+    guard let source=CGImageSourceCreateWithData(encoded as CFData,nil),
+          let image=CGImageSourceCreateImageAtIndex(source,0,
+            [kCGImageSourceShouldCacheImmediately:true] as CFDictionary) else {
+      throw PhoneError("Cannot decode screenshot")
     }
-    throw PhoneError("Screenshot unavailable")
+    return image
   }
 
   static func jpeg(_ image: CGImage, maxSize: Int) throws -> ([String: Any], String) {
@@ -316,10 +295,16 @@ public final class Phone {
   }
 
   func apps() throws -> [[String: Any]] {
-    let result = try Command.device(["device", "info", "apps", "--include-all-apps"], id: info.id)
-    return (result["apps"] as? [[String: Any]] ?? []).filter {
-      $0["hidden"] as? Bool != true && $0["internalApp"] as? Bool != true && $0["appClip"] as? Bool != true
+    let result = try nativeConnection().stream("com.apple.coredevice.appservice",
+      feature:"com.apple.coredevice.feature.streamapplist",input:[
+        "includeAppClips":false, "includeRemovableApps":true, "includeHiddenApps":false,
+        "includeInternalApps":false, "includeDefaultApps":true,
+        "requireContainerAccess":false, "includeAppGroupIdentifiers":false, "includeContainerPaths":false,
+      ])
+    guard let apps=result as? [[String:Any]] else {
+      throw PhoneError("Invalid application catalog")
     }
+    return apps
   }
 
   func appID(_ name: String) throws -> String {
@@ -368,16 +353,25 @@ public final class Phone {
   func stopApp(_ name: String) throws {
     let id = try appID(name)
     guard let app = try apps().first(where: { $0["bundleIdentifier"] as? String == id }),
-          let urlString = app["url"] as? String, let bundle = URL(string:urlString) else {
+          let path = app["path"] as? String else {
       throw PhoneError("The app bundle path is unavailable")
     }
-    let processes = try Command.device(["device","info","processes"],id:info.id)
-    for process in processes["runningProcesses"] as? [[String:Any]] ?? [] {
-      guard let executable = process["executable"] as? String,
-            let path = URL(string:executable),
+    func fileURL(_ value: String) -> URL? {
+      value.hasPrefix("/") ? URL(fileURLWithPath:value) : URL(string:value)
+    }
+    guard let bundle=fileURL(path) else { throw PhoneError("Invalid app bundle path") }
+    let connection=try nativeConnection()
+    let processes=try connection.stream("com.apple.coredevice.appservice",
+      feature:"com.apple.coredevice.feature.streamprocesslist",input:[:])
+    for case let process as [String:Any] in processes {
+      guard let executable = process["executableURL"] as? [String:Any],
+            let relative = executable["relative"] as? String, let path=fileURL(relative),
             path.deletingLastPathComponent().standardized.path == bundle.standardized.path,
             let pid = process["processIdentifier"] as? NSNumber, pid.intValue > 0 else { continue }
-      _ = try Command.device(["device","process","terminate","--pid",pid.stringValue],id:info.id)
+      _ = try connection.invoke("com.apple.coredevice.appservice",
+        feature:"com.apple.coredevice.feature.sendsignaltoprocess",input:[
+          "process":["processIdentifier":pid.int64Value], "signal":Int64(SIGTERM),
+        ])
     }
   }
 
@@ -389,7 +383,9 @@ public final class Phone {
         let connection = try nativeConnection()
         if axSession == nil {
           let socket = try connection.socket("com.apple.accessibility.axAuditDaemon.remoteAXService")
-          axSession = try DTXSession(socket:socket)
+          // A saved port that no longer answers as accessibility is stale.
+          do { axSession = try DTXSession(socket:socket) }
+          catch { connection.invalidateDirectory(); throw error }
         }
         return try Screen(responses:axSession!.tree(preferPush: preferPush),scale:display()["scale"] as? Double ?? 3,locked:locked())
       } catch {

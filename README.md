@@ -50,7 +50,7 @@ The default phone selection is retained within a server session, avoiding repeat
 
 `lock` ends the developer display session, sends the side button once, and waits for a stable locked state with the screen off. `unlock` wakes the display before checking whether authentication is needed, verifies an empty system passcode field, and checks live lock state before each digit.
 
-Lock and display checks reuse native connections. Lock state comes from the trusted lockdown service over Apple's existing tunnel because this phone's developer image does not implement the advertised `getlockstate` action. Fresh accessibility tree pushes can shorten passcode readiness checks; incomplete or old pushes fall back to reading the tree. Unsolicited updates are kept separate from individual element replies.
+Lock and display checks reuse native connections. Lock state and screenshots come from CoreDevice itself (`currentLockState` and the screen-capture service), so they open no extra connection to the phone. Accessibility is the one tool that connects straight to a service port. Reading the phone's service directory displaces macOS's own directory connection, so the port table is read once per tunnel and saved in `~/.cache/lightpinky/run/ports-<UDID>.json`; it is read again only when a saved port stops answering. Fresh accessibility tree pushes can shorten passcode readiness checks; incomplete or old pushes fall back to reading the tree. Unsolicited updates are kept separate from individual element replies.
 
 Developer preparation requests only Developer Mode and DDI services. It avoids the legacy MobileDevice power assertion: `AMDevicePowerAssertionCreate` has been observed hanging over Wi-Fi and invalidating otherwise usable sessions. App launch also uses the existing native app-service connection instead of starting a separate `devicectl` process.
 
@@ -70,7 +70,7 @@ The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix s
 
 The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired devices; a `Phone` exposes native `power()` state and `screenshot()` as a `CGImage`. `Server.respond(_:)` accepts JSON-RPC data, including `tools/list` for discovering the full control interface. The same implementation backs the executable and embedded callers.
 
-Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; state checks and Instruments screenshots use native connections. A failed state read or screenshot transport reconnects once; this does not repeat input.
+Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; `power()` and `screenshot()` use CoreDevice requests only and never read the phone's service directory, so a polling embedder does not disturb macOS's connection.
 
 ### Install the agent skill
 

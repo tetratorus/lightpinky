@@ -134,7 +134,7 @@ final class DTXSession {
     let id=nextID()
     condition.lock(); waitingID=id; rpcResult=nil; condition.unlock()
     try send(id:id,channel:channel,reply:true,value:selector,args:args)
-    return try wait(seconds:8,ax:false)
+    return try wait(seconds:8,ax:false,operation:selector)
   }
 
   /// Instruments uses the same DTX framing, without activating accessibility.
@@ -268,7 +268,7 @@ final class DTXSession {
       condition.unlock()
     }
   }
-  private func wait(seconds: Double,ax: Bool) throws -> Any {
+  private func wait(seconds: Double,ax: Bool,operation: String = "API exchange") throws -> Any {
     let deadline=Date(timeIntervalSinceNow:seconds)
     condition.lock(); defer { condition.unlock() }
     while !closed && failure==nil && (ax ? axResult==nil : rpcResult==nil) {
@@ -277,7 +277,7 @@ final class DTXSession {
     if let failure { throw failure }
     guard !closed else { throw AccessibilityFailure.disconnected }
     guard let result:Any = ax ? axResult : rpcResult else {
-      throw AccessibilityFailure.timeout(ax ? "request \(waitingType ?? -1)" : "API exchange")
+      throw AccessibilityFailure.timeout(ax ? "request \(waitingType ?? -1)" : operation)
     }
     return result
   }

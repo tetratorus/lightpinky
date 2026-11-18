@@ -20,13 +20,9 @@ final class Media {
     let queue = DispatchQueue(label:"lightpinky.media")
     let packets = DispatchSource.makeReadSource(fileDescriptor:fd,queue:queue)
     let descriptor = fd
-    let firstPacket = DispatchSemaphore(value:0)
-    var received = false // accessed only on the media queue
     packets.setEventHandler {
       var buffer = [UInt8](repeating:0,count:65536)
-      while recv(descriptor,&buffer,buffer.count,0) > 0 {
-        if !received { received = true; firstPacket.signal() }
-      }
+      while recv(descriptor,&buffer,buffer.count,0) > 0 {}
     }
     packets.setCancelHandler { close(descriptor) }
     packets.resume()
@@ -63,9 +59,9 @@ final class Media {
         feedback.resume()
         timer = feedback
       }
-      guard firstPacket.wait(timeout:.now() + 5) == .success else {
-        throw PhoneError("Native display session started but no media packets arrived; touch was not sent")
-      }
+      // The acknowledged session enables input. Receiving video is a separate
+      // UDP path; keyboard registration and passcode-screen checks still have
+      // to succeed before unlock sends any digits.
       Thread.sleep(forTimeInterval:max(0,0.5 - (ProcessInfo.processInfo.systemUptime - began)))
     } catch {
       if started && connection.isValid {

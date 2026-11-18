@@ -16,6 +16,9 @@ extension CoreObject {
   func connect(_ service: String, _ mode: UInt64, _ events: DispatchQueue, _ completionQueue: DispatchQueue?,
                _ completion: @escaping (Result<AnyObject, Error>) -> Void)
 
+  @_silgen_name("$s10CoreDevice06RemoteB0C16currentLockStateAA0eF0VvgTj")
+  fileprivate func currentLockState() async throws -> CoreStorage
+
   @_silgen_name("$s10CoreDevice0B14UsageAssertionC27registerInvalidationHandler15invokingOnQueue7handlerySo17OS_dispatch_queueCSg_ys5Error_pSgctFTj")
   func onInvalidation(_ queue: DispatchQueue?, _ handler: @escaping (Error?) -> Void)
 }
@@ -27,6 +30,9 @@ private func coreManager() -> CoreObject
 // result in this client; only the first two words are used by these APIs.
 private struct CoreStorage {
   var a: UInt = 0, b: UInt = 0, c: UInt = 0, d: UInt = 0, e: UInt = 0
+
+  @_silgen_name("$s10CoreDevice9LockStateV18isPasscodeRequiredSbvg")
+  func isPasscodeRequired() -> Bool
 }
 @_silgen_name("$s10CoreDevice21UsageAssertionOptionsV20requiredPreparednessAcA0bG0V_tcfC")
 private func coreOptions(_ preparedness: UnsafeRawPointer) -> CoreStorage
@@ -118,14 +124,27 @@ final class CoreConnection {
     LPRemoteSend(try channel(service), Self.xpc(dictionary))
   }
 
+  /// Service sockets go straight to the port the phone advertised. The port
+  /// table is kept on disk per tunnel address, because every read of the
+  /// phone's service directory displaces macOS's own directory connection.
   func socket(_ service: String) throws -> FileHandle {
     guard isValid else { throw PhoneError("CoreDevice connection ended") }
-    guard let port=try discoverServices()[service],let peerIP else {
-      throw PhoneError("The phone did not advertise \(service)")
+    for attempt in 0..<2 {
+      let peer=try tunnelAddress()
+      if let port=try discoverServices()[service] {
+        let fd=LPConnectTCP(peer,port)
+        if fd>=0 { return FileHandle(fileDescriptor:fd,closeOnDealloc:true) }
+      } else if attempt==1 {
+        throw PhoneError("The phone did not advertise \(service)")
+      }
+      invalidateDirectory()
     }
-    let fd=LPConnectTCP(peerIP,port)
-    guard fd>=0 else { throw AccessibilityFailure.disconnected }
-    return FileHandle(fileDescriptor:fd,closeOnDealloc:true)
+    throw AccessibilityFailure.disconnected
+  }
+
+  private var portCache: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".cache/lightpinky/run/ports-\(udid).json")
   }
 
   func tunnelAddress() throws -> String {
@@ -180,6 +199,12 @@ final class CoreConnection {
   func discoverServices() throws -> [String:UInt16] {
     if let directServices { return directServices }
     let peer = try tunnelAddress()
+    if let data=try? Data(contentsOf:portCache),
+       let saved=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
+       saved["peer"] as? String == peer, let ports=saved["ports"] as? [String:Int] {
+      let cached=ports.compactMapValues { UInt16(exactly:$0) }
+      if !cached.isEmpty { directServices=cached; return cached }
+    }
     guard let port = directoryPort else { throw PhoneError("Service-directory port unavailable") }
     let handshake=try ServiceDirectory(peer:peer,port:port).read()
     guard let services=handshake["Services"] as? [String:[String:Any]],
@@ -192,6 +217,13 @@ final class CoreConnection {
       return port
     }
     directServices=ports
+    let directory=portCache.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,
+      attributes:[.posixPermissions:0o700])
+    if let data=try? JSONSerialization.data(withJSONObject:["peer":peer,"ports":ports.mapValues { Int($0) }]) {
+      try? data.write(to:portCache,options:.atomic)
+      chmod(portCache.path,0o600)
+    }
     return ports
   }
 
@@ -199,6 +231,7 @@ final class CoreConnection {
     directServices=nil
     peerIP=nil
     directoryPort=nil
+    try? FileManager.default.removeItem(at:portCache)
   }
 
   func request(_ service: String, _ dictionary: [String: Any]) throws -> xpc_object_t {
@@ -220,7 +253,7 @@ final class CoreConnection {
     return response
   }
 
-  func invoke(_ service: String, feature: String, action: String = "", input: [String: Any]) throws -> xpc_object_t {
+  private func invocation(feature: String, action: String = "", input: [String: Any]) -> [String: Any] {
     var message: [String: Any] = [
       "CoreDevice.CoreDeviceDDIProtocolVersion": Int64(2),
       "CoreDevice.action": [String: Any](),
@@ -232,14 +265,102 @@ final class CoreConnection {
       "CoreDevice.invocationIdentifier": UUID().uuidString,
     ]
     if !action.isEmpty { message["CoreDevice.actionIdentifier"] = action }
-    let response = try request(service,message)
+    return message
+  }
+
+  /// Current DDIs stream application catalogs; the old listapps request can
+  /// wedge dtappserviced. Use an isolated channel for its side-channel pushes.
+  func stream(_ service: String, feature: String, input: [String: Any]) throws -> [Any] {
+    guard isValid else { throw PhoneError("CoreDevice connection ended") }
+    let connected = DispatchSemaphore(value: 0)
+    var result: Result<AnyObject, Error>?
+    device.connect(service, 0, queue, queue) { value in result=value; connected.signal() }
+    guard connected.wait(timeout:.now()+10) == .success else {
+      throw PhoneError("CoreDevice stream connection timed out")
+    }
+    let connection = try result!.get()
+    defer { LPRemoteCancel(connection) }
+    let condition = NSCondition()
+    var elements: [Any] = []
+    var finished = false
+    var failure: Error?
+    func receive(_ event: xpc_object_t) {
+      condition.lock(); defer { condition.broadcast(); condition.unlock() }
+      guard !finished else { return }
+      if xpc_get_type(event) == XPC_TYPE_ERROR {
+        failure=PhoneError("CoreDevice stream disconnected"); finished=true; return
+      }
+      guard let body=Self.object(event) as? [String:Any] else { return }
+      if let error=body["CoreDevice.error"] {
+        failure=PhoneError("CoreDevice stream failed: \(error)"); finished=true; return
+      }
+      guard let status=body["CoreDevice.XPCMessageKey.sideChannelStatus"] as? [String:Any] else { return }
+      if let error=status["receivedError"] {
+        failure=PhoneError("CoreDevice stream failed: \(error)"); finished=true
+      } else if status["finishStreaming"] != nil {
+        finished=true
+      } else if let push=status["pushing"] as? [String:Any], let batch=push["elements"] as? [Any] {
+        guard elements.count+batch.count<=10000 else {
+          failure=PhoneError("CoreDevice stream exceeded its element limit"); finished=true; return
+        }
+        elements.append(contentsOf:batch)
+      } else {
+        failure=PhoneError("Malformed CoreDevice stream status"); finished=true
+      }
+    }
+    LPRemoteActivate(connection,receive)
+    let message=invocation(feature:feature,input:[
+      "actualInput":input, "streamProxy":["sideChannel":UUID()],
+    ])
+    LPRemoteRequest(connection,Self.xpc(message),queue,receive)
+    let deadline=Date(timeIntervalSinceNow:15)
+    condition.lock(); defer { condition.unlock() }
+    while !finished {
+      if !condition.wait(until:deadline) { throw PhoneError("CoreDevice stream timed out") }
+    }
+    if let failure { throw failure }
+    return elements
+  }
+
+  func invoke(_ service: String, feature: String, action: String = "", input: [String: Any]) throws -> xpc_object_t {
+    let response = try request(service,invocation(feature:feature,action:action,input:input))
     if let output = xpc_dictionary_get_value(response,"CoreDevice.output") { return output }
     if let error = xpc_dictionary_get_value(response,"CoreDevice.error"),
        let info = xpc_dictionary_get_value(error,"userInfo"),
        let description = xpc_dictionary_get_string(info,"NSLocalizedDescription") {
       throw PhoneError("\(String(cString:description)) (CoreDevice \(xpc_dictionary_get_int64(error,"code")))")
     }
-    throw PhoneError("CoreDevice invocation failed")
+    if let error=xpc_dictionary_get_value(response,"CoreDevice.error") {
+      throw PhoneError("CoreDevice \(feature) failed: \(Self.object(error))")
+    }
+    throw PhoneError("CoreDevice \(feature) returned no output: \(Self.object(response))")
+  }
+
+  func locked() throws -> Bool {
+    let ready=DispatchSemaphore(value:0)
+    var result:Result<Bool,Error>?
+    Task {
+      do { result = .success(try await device.currentLockState().isPasscodeRequired()) }
+      catch { result = .failure(error) }
+      ready.signal()
+    }
+    guard ready.wait(timeout:.now()+10) == .success else {
+      throw PhoneError("CoreDevice lock state timed out")
+    }
+    return try result!.get()
+  }
+
+  func screenshotData() throws -> Data {
+    let output=try invoke("com.apple.coredevice.screencaptureservice",
+      feature:"com.apple.coredevice.feature.capturescreenshot",
+      action:"com.apple.coredevice.action.capturescreenshot",
+      input:["displayUniqueID":NSNull(),"requestedFormat":"png"])
+    guard let image=xpc_dictionary_get_value(output,"image"),
+          xpc_get_type(image)==XPC_TYPE_DATA,
+          let bytes=xpc_data_get_bytes_ptr(image),xpc_data_get_length(image)>0 else {
+      throw PhoneError("CoreDevice screenshot returned no image data")
+    }
+    return Data(bytes:bytes,count:xpc_data_get_length(image))
   }
 
   static func xpc(_ value: Any) -> xpc_object_t {
