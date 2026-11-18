@@ -1,3 +1,5 @@
 /lightpinky
 __pycache__/
 /phoneframes
+.build/
+.swiftpm/

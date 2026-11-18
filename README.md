@@ -1,12 +1,14 @@
 # lightpinky
 
-An MCP server that gives an agent an iPhone's raw developer services: screenshots, the accessibility element tree, touch, keys, typing and apps. It is the iOS driver of [Pinky](https://github.com/DIYgod/pinky) with the app, the gateway, the policy engine, Android, telemetry and the updater removed. The agent decides how to observe, wait, retry and chain steps.
+A native Swift MCP server for this Mac and its paired iPhone: screenshots, accessibility elements, touch, keys, typing and apps. The agent decides how to observe, wait and chain operations. Discover the current schemas with `scripts/phone tools`.
 
-No jailbreak and nothing installed on the phone (iOS 27+). It also drives the iOS Simulator. It talks to the same developer services Xcode uses, through [go-ios](https://github.com/danielpaulus/go-ios).
+macOS owns pairing, the CoreDevice Wi-Fi tunnel and developer services. The executable uses CoreDevice, RemoteXPC, Foundation and the kernel network stack. There is no Go executable, custom VPN, userspace IP stack or helper installed on the phone.
+
+This build targets an Apple silicon Mac with full Xcode and an iOS 27 iPhone. It uses private APIs from the installed Apple frameworks and may need adjustment after an OS/Xcode update. Simulator support and remote TCP HTTP serving from the former Go implementation are not part of this build.
 
 ## Setup
 
-On a Mac with Python 3.9+:
+With Xcode selected by `xcode-select` and Python 3.9+:
 
 ```sh
 gh repo clone tetratorus/lightpinky
@@ -15,23 +17,19 @@ python3 scripts/setup.py
 scripts/phone tools
 ```
 
-Setup builds the binary. All Go dependencies are checked into `vendor/`; no Go module downloads are needed. If a suitable Go toolchain is missing, setup downloads the version pinned in `go.mod` from go.dev, checks its published SHA-256, and installs it in your user cache without changing the system. With Go already installed, the build works offline.
+Setup runs `xcrun swift build -c release` and atomically installs `./lightpinky`. It downloads no toolchain or package dependencies. Python is used by the installer and bundled MCP client; phone control runs in the Swift executable.
 
 For an existing checkout, run `git pull --ff-only` and `python3 scripts/setup.py` to update it. Do not overwrite uncommitted changes.
 
 ### Connect the phone
 
-First time on a Mac: plug in the iPhone, unlock it, tap **Trust**, and turn on **Settings › Privacy & Security › Developer Mode**. Those on-device approvals are required once. Afterwards, USB or the same Wi-Fi subnet works (`-wifi=false` disables Wi-Fi for the MCP server).
+First time on a Mac: pair the iPhone in Xcode, tap **Trust**, and enable **Settings › Privacy & Security › Developer Mode**. Once paired, macOS maintains the Wi-Fi connection. The server uses that existing connection.
 
 ```sh
 scripts/phone devices
 ```
 
-Discovery waits for Wi-Fi announcements instead of returning an immediate empty list. The result explains any setup still needed. The server mounts Apple's developer disk image automatically when available. If it is missing, use `scripts/phone download_disk_image devices`; this downloads a pinned, checksummed image, so a full Xcode install is not required.
-
-### iOS Simulator
-
-With Xcode installed, booted Simulators are listed by `devices` too (`virtual: true`), next to real phones (`-simulators=false` turns this off). Boot one in Simulator.app or with `xcrun simctl boot <UDID>`. The first time, lightpinky downloads a pinned, checksummed [Appium WebDriverAgent](https://github.com/appium/WebDriverAgent) and builds it with Xcode into your user cache (about a minute); opening a Simulator starts it there. A Simulator has no passcode: `unlock` and the wake option are not needed.
+Discovery uses `devicectl list devices`. Explicit control acquires a CoreDevice usage assertion and prepares the developer services supplied by Xcode. `download_disk_image` retains its old tool name for compatibility; it prepares Xcode's installed services and does not download a separate disk image.
 
 ### Wake, unlock and operate
 
@@ -42,11 +40,11 @@ scripts/phone unlock 'launch={"app":"Shopee"}' elements screenshot
 
 `unlock` reads `IPHONE_UNLOCK_CODE` in the **server's environment**, not a tool argument. The owner configures that variable locally. If it is not already exported, `scripts/phone` loads `~/.zshrc` inside zsh and exports it directly to the server. It never prints the code or puts it in command-line arguments. Do not paste the code into chat or commit it.
 
-Locked Wi-Fi phones can be woken and unlocked: `needs_setup: unlock` is not a reason to ask for a cable. These explicit tools open the paired developer connection, wake the display, and use the existing system passcode keypad. A transient connection EOF is retried before input; a passcode attempt is never automatically repeated. Face ID approvals and first-time Trust/Developer Mode confirmations still require the person.
+Explicit wake/unlock opens the paired developer connection and uses the system passcode screen. Unlock verifies that screen before entering the configured numeric code once. It never retries passcode entry. Face ID approvals and first-time Trust/Developer Mode confirmations still require the person.
 
 `scripts/phone` accepts any tool from `tools`, with arguments as `tool=JSON`. It prints complete text results, saves screenshots to temporary files and prints their paths, and exits nonzero on a failed tool instead of continuing. It builds the binary automatically if missing.
 
-Calls share one background server, so the phone connection stays open between invocations and each call takes well under a second instead of reconnecting. The server listens on a socket under `~/.cache/lightpinky/run/` that only your user can open, restarts when the binary is rebuilt, and exits after 15 minutes without calls (`LIGHTPINKY_IDLE=5m` changes that). `scripts/phone stop` ends it; `LIGHTPINKY_DAEMON=0` runs a fresh server for just that invocation. `LIGHTPINKY_DEVICE=<UDID>` fills in `device` for every call that takes one.
+Calls share a background server and its device connections. It listens on a private Unix socket under `~/.cache/lightpinky/run/`, restarts when the binary changes, and exits after 15 minutes without calls (`LIGHTPINKY_IDLE=5m` changes that). `scripts/phone stop` ends it; `LIGHTPINKY_DAEMON=0` runs a fresh server for one invocation. `LIGHTPINKY_DEVICE=<UDID>` supplies the default device.
 
 For example, `scripts/phone unlock apps` lists app names and bundle IDs; `scripts/phone unlock 'launch={"app":"Settings"}' elements` opens Settings and reads its screen. Discover coordinates through `elements` or `screenshot` rather than assuming them.
 
@@ -54,7 +52,7 @@ For example, `scripts/phone unlock apps` lists app names and bundle IDs; `script
 
 Run `./lightpinky` as a stdio MCP server in any client. Pass `IPHONE_UNLOCK_CODE` in that process's environment to enable its `unlock` tool. `scripts/phone` is a bundled MCP client, so agents with shell access do not need MCP registration.
 
-Remote agents: `LIGHTPINKY_TOKEN=... ./lightpinky -http 100.x.y.z:7310` serves MCP at `/mcp` behind a bearer token. Bind it to a private address such as Tailscale's; anyone with the token can drive and, if configured, unlock the phone.
+The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix socket. The parent directory must belong to the current user with mode 700; the server verifies each client's Unix identity.
 
 ### Install the agent skill
 
@@ -65,33 +63,34 @@ The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/l
 | Tool | What it does |
 |---|---|
 | `devices` | Phones this Mac sees, their state, and what a phone that is not online waits for |
-| `download_disk_image` | Fetch the developer disk image |
+| `download_disk_image` | Prepare developer services supplied by Xcode |
 | `unlock` | Wake and unlock using the server's `IPHONE_UNLOCK_CODE`, including over Wi-Fi |
 | `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by |
 | `elements` | App in front, lock/keyboard state, then one line per element: role, label, id, center `@x,y`, bounds, states. `json` returns the full structure |
-| `tap` | Tap or long-press `x`, `y` |
+| `tap` | Tap or long-press `x`, `y`, or match `find` with optional `role` and zero-based `index` |
 | `swipe` | Swipe `x1,y1` → `x2,y2` over `duration_ms` |
 | `type` | Type into the focused field (via the pasteboard, any language) |
 | `key` | `home`, `back`, `enter`, `delete`, … |
 | `launch` | Open an app by bundle id or name |
 | `apps` | Installed apps |
 | `stop_app` | Quit an app |
-| `open_link` | Open a URL in the app iOS would open it in |
+| `open_link` | Open a URL in Safari, or deliver it to an explicitly named `app` |
 | `power` | Locked / screen on, optionally wake the screen |
 
-Device tools take an optional `device` (UDID); omit it when only one usable phone is found. Actions (`tap`, `swipe`, `type`, `key`, `launch`, `stop_app`, `open_link`) return once the screen stops changing, for up to 2 s, so the next `elements` or `screenshot` sees the result; `no_settle` returns immediately. Wake/unlock also consider locked Wi-Fi phones. With several phones, pass the desired ID from `devices`.
+Device tools accept a UDID, CoreDevice UUID or exact device name. Omit it when there is one paired iPhone. Actions wait 350 ms after completion unless `no_settle:true`; this is a fixed delay, not a guarantee that an animation has finished.
+
+Accessibility reads the foreground app's native tree through DTX, with bounds converted from points to screenshot pixels. It does not currently merge a separate SpringBoard tree for notification banners or system overlays. Touch and keyboard input require an active developer display session; iOS rejects starting that session during a phone or VoIP call.
 
 ## What is not here
 
-No blocked apps, approvals or credential-field rules: the agent can do anything a person holding the unlocked phone can. Lock sensitive apps with iOS's own **Require Face ID**. Anything with shell access to this Mac can drive the phone directly anyway.
+The server exposes device capabilities; the agent and owner decide how to use them. iOS authentication and app restrictions still apply.
 
 It can enter a configured passcode on the system unlock screen. It cannot pass Face ID.
 
 ## Verify
 
 ```sh
-GOPROXY=off GOTOOLCHAIN=local go test -mod=vendor ./...
-GOPROXY=off GOTOOLCHAIN=local go vet -mod=vendor ./cmd/...
+swift build -c release
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
