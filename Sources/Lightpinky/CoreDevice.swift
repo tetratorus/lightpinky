@@ -345,7 +345,7 @@ final class CoreConnection {
       catch { result = .failure(error) }
       ready.signal()
     }
-    guard ready.wait(timeout:.now()+10) == .success else {
+    guard ready.wait(timeout:.now()+20) == .success else {
       throw PhoneError("CoreDevice lock state timed out")
     }
     return try result!.get()
