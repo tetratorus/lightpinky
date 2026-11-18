@@ -38,7 +38,9 @@ final class LockStateTests: XCTestCase {
     for value: [String: Any] in [[:], ["Value": 0], ["Value": 1], ["Value": "false"]] {
       try withPeer(checkin() + frame(value)) { client, _ in
         let reader = try LockStateReader(socket: client)
-        XCTAssertThrowsError(try reader.locked())
+        XCTAssertThrowsError(try reader.locked()) { error in
+          XCTAssertFalse(error is LockStateTransportFailure)
+        }
       }
     }
   }
@@ -57,7 +59,9 @@ final class LockStateTests: XCTestCase {
       let reader = try LockStateReader(socket: client)
       XCTAssertTrue(try reader.locked())
       shutdown(peer.fileDescriptor, SHUT_WR)
-      XCTAssertThrowsError(try reader.locked())
+      XCTAssertThrowsError(try reader.locked()) { error in
+        XCTAssertTrue(error is LockStateTransportFailure)
+      }
     }
   }
 
@@ -79,7 +83,7 @@ final class AccessibilitySnapshotTests: XCTestCase {
   private var leaf: [String: Any] { ["type": 5, "object": child, "result": ["33": "Enter Passcode"]] }
 
   func testOrdersUnorderedSnapshotFromForegroundRoot() throws {
-    let result = try XCTUnwrap(AccessibilitySession.orderedTree([leaf, front, root], front: front))
+    let result = try XCTUnwrap(DTXSession.orderedTree([leaf, front, root], front: front))
     XCTAssertEqual(result.count, 3)
     XCTAssertEqual((result[1]["object"] as? [String: Int])?["id"], 1)
     XCTAssertEqual((result[2]["object"] as? [String: Int])?["id"], 2)
@@ -87,26 +91,26 @@ final class AccessibilitySnapshotTests: XCTestCase {
 
   func testRejectsSnapshotFromAnotherApplication() {
     let other: [String: Any] = ["type": 4, "result": ["pid": 11, "id": 1]]
-    XCTAssertNil(AccessibilitySession.orderedTree([front, root, leaf], front: other))
+    XCTAssertNil(DTXSession.orderedTree([front, root, leaf], front: other))
   }
 
   func testIncompleteSnapshotFallsBackToLiveWalk() {
-    XCTAssertNil(AccessibilitySession.orderedTree([front, root], front: front))
+    XCTAssertNil(DTXSession.orderedTree([front, root], front: front))
   }
 
   func testPushCannotSatisfyAnAttributeRequestWithTheSameType() {
     let push: [String: Any] = ["type": 5, "notification": 0, "result": ["treeDump": [front, root, leaf]]]
-    XCTAssertFalse(AccessibilitySession.isReply(push, type: 5, object: nil))
+    XCTAssertFalse(DTXSession.isReply(push, type: 5, object: nil))
   }
 
   func testAttributeReplyMustMatchRequestedObject() {
-    XCTAssertTrue(AccessibilitySession.isReply(leaf, type: 5, object: "10:2"))
-    XCTAssertFalse(AccessibilitySession.isReply(leaf, type: 5, object: "10:1"))
-    XCTAssertFalse(AccessibilitySession.isReply(leaf, type: nil, object: nil))
+    XCTAssertTrue(DTXSession.isReply(leaf, type: 5, object: "10:2"))
+    XCTAssertFalse(DTXSession.isReply(leaf, type: 5, object: "10:1"))
+    XCTAssertFalse(DTXSession.isReply(leaf, type: nil, object: nil))
   }
 
   func testNotificationIsNotAReplyButRequestErrorsAre() {
-    XCTAssertFalse(AccessibilitySession.isReply(["type": 5, "notification": 1], type: 5, object: nil))
-    XCTAssertTrue(AccessibilitySession.isReply(["type": 5, "error": 8], type: 5, object: "10:2"))
+    XCTAssertFalse(DTXSession.isReply(["type": 5, "notification": 1], type: 5, object: nil))
+    XCTAssertTrue(DTXSession.isReply(["type": 5, "error": 8], type: 5, object: "10:2"))
   }
 }

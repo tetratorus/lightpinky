@@ -33,7 +33,7 @@ public final class Phone {
   public let info: PhoneInfo
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
-  private var axSession: AccessibilitySession?
+  private var axSession: DTXSession?
   private var lockStateReader: LockStateReader?
   public init(_ info: PhoneInfo) { self.info = info }
   deinit { axSession?.close() }
@@ -59,15 +59,20 @@ public final class Phone {
   }
 
   func locked() throws -> Bool {
-    let connection = try nativeConnection()
-    do {
-      if lockStateReader == nil { lockStateReader = try LockStateReader(connection: connection) }
-      return try lockStateReader!.locked()
-    } catch {
-      lockStateReader = nil
-      connection.invalidateDirectory()
-      throw error
+    for attempt in 0..<2 {
+      let connection = try nativeConnection()
+      do {
+        if lockStateReader == nil { lockStateReader = try LockStateReader(connection: connection) }
+        return try lockStateReader!.locked()
+      } catch {
+        lockStateReader = nil
+        connection.invalidateDirectory()
+        // Reconnect a stalled read once, including during post-unlock
+        // verification. Only GetValue is repeated, never keyboard input.
+        guard attempt == 0, error is LockStateTransportFailure else { throw error }
+      }
     }
+    throw PhoneError("Lock state unavailable")
   }
 
   func display() throws -> [String: Any] {
@@ -118,28 +123,23 @@ public final class Phone {
   }
 
   public func screenshot() throws -> CGImage {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lightpinky-shot-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                           attributes: [.posixPermissions: 0o700])
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let path = directory.appendingPathComponent("screen.png")
-    for attempt in 0..<4 {
+    for attempt in 0..<2 {
+      let connection = try nativeConnection()
       do {
-        _ = try Command.device(["device", "capture", "screenshot", "--destination", path.path], id: info.id)
-        break
+        let socket = try connection.socket("com.apple.instruments.dtservicehub")
+        let session = try DTXSession(socket:socket,accessibility:false)
+        defer { session.close() }
+        let encoded = try session.screenshotData()
+        guard let source = CGImageSourceCreateWithData(encoded as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0,
+                [kCGImageSourceShouldCacheImmediately:true] as CFDictionary) else { throw PhoneError("Cannot decode screenshot") }
+        return image
       } catch {
-        // The passive recorder can briefly own the device's screenshot slot.
-        guard attempt < 3, error.localizedDescription.contains("25003") else { throw error }
-        Thread.sleep(forTimeInterval:0.2)
+        connection.invalidateDirectory()
+        guard attempt == 0, error is AccessibilityFailure else { throw error }
       }
     }
-    // ImageIO decodes lazily. Own the encoded bytes before removing the
-    // temporary file, otherwise subsequent OCR/JPEG encoding loses the pixels.
-    let encoded = try Data(contentsOf:path)
-    guard let source = CGImageSourceCreateWithData(encoded as CFData, nil),
-          let image = CGImageSourceCreateImageAtIndex(source, 0,
-            [kCGImageSourceShouldCacheImmediately:true] as CFDictionary) else { throw PhoneError("Cannot decode screenshot") }
-    return image
+    throw PhoneError("Screenshot unavailable")
   }
 
   static func jpeg(_ image: CGImage, maxSize: Int) throws -> ([String: Any], String) {
@@ -389,7 +389,7 @@ public final class Phone {
         let connection = try nativeConnection()
         if axSession == nil {
           let socket = try connection.socket("com.apple.accessibility.axAuditDaemon.remoteAXService")
-          axSession = try AccessibilitySession(socket:socket)
+          axSession = try DTXSession(socket:socket)
         }
         return try Screen(responses:axSession!.tree(preferPush: preferPush),scale:display()["scale"] as? Double ?? 3,locked:locked())
       } catch {

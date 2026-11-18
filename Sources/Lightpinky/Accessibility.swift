@@ -7,8 +7,8 @@ enum AccessibilityFailure: LocalizedError {
   case rejected(Int)
   var errorDescription:String? {
     switch self {
-    case .disconnected: return "Accessibility connection closed"
-    case .timeout(let stage): return "Accessibility \(stage) timed out"
+    case .disconnected: return "Device service connection closed"
+    case .timeout(let stage): return "Device service \(stage) timed out"
     case .rejected(let code): return "Accessibility returned error \(code)"
     }
   }
@@ -17,8 +17,10 @@ enum AccessibilityFailure: LocalizedError {
 /// DTX over the socket advertised by the existing CoreDevice tunnel.
 /// Framing follows go-ios (MIT); AX requests follow this repository's former
 /// driver. Foundation handles keyed archives; macOS owns pairing and routing.
-final class AccessibilitySession {
+final class DTXSession {
+  private struct IntegerArgument { let value: UInt32 }
   private let socket: FileHandle
+  private let accessibility: Bool
   private let condition = NSCondition()
   private let writes = NSLock()
   private var sequence: UInt32 = 5
@@ -33,8 +35,9 @@ final class AccessibilitySession {
   private var pushedAt: Double = 0
   private let limit = 20 * 1024 * 1024
 
-  init(socket: FileHandle) throws {
+  init(socket: FileHandle, accessibility: Bool = true) throws {
     self.socket=socket
+    self.accessibility=accessibility
     var timeout=timeval(tv_sec:5,tv_usec:0)
     setsockopt(socket.fileDescriptor,SOL_SOCKET,SO_SNDTIMEO,&timeout,socklen_t(MemoryLayout.size(ofValue:timeout)))
     DispatchQueue(label:"lightpinky.accessibility.receive").async { [weak self] in self?.readLoop() }
@@ -43,6 +46,12 @@ final class AccessibilitySession {
       _ = try call("_notifyOfPublishedCapabilities:",args:[
         ["com.apple.private.DTXBlockCompression":0,"com.apple.private.DTXConnection":1]
       ])
+      if !accessibility {
+        _ = try request("_requestChannelWithCode:identifier:", args:[
+          IntegerArgument(value:1), "com.apple.instruments.server.services.screenshot"
+        ])
+        return
+      }
       let identifier = nextID()
       condition.lock(); waitingID=identifier; rpcResult=nil; condition.unlock()
       try send(id:identifier,reply:true,value:"deviceAPIVersion")
@@ -62,7 +71,7 @@ final class AccessibilitySession {
     condition.broadcast()
     condition.unlock()
     if wasClosed { return }
-    _ = try? call("clientNeedsAccessibility:",args:[false])
+    if accessibility { _ = try? call("clientNeedsAccessibility:",args:[false]) }
     // Closing the socket also releases the phone's accessibility client.
     shutdown(socket.fileDescriptor,SHUT_RDWR)
     // Let the receive loop finish before FileHandle closes the descriptor,
@@ -80,6 +89,11 @@ final class AccessibilitySession {
                     reply: Bool = false, kind: UInt32 = 2, value: Any? = nil, args: [Any] = []) throws {
     var auxiliary=Data()
     for arg in args {
+      if let integer=arg as? IntegerArgument {
+        Self.append(10,to:&auxiliary); Self.append(3,to:&auxiliary)
+        Self.append(UInt64(integer.value),to:&auxiliary)
+        continue
+      }
       let archive=try NSKeyedArchiver.archivedData(withRootObject:arg,requiringSecureCoding:true)
       Self.append(10,to:&auxiliary); Self.append(2,to:&auxiliary)
       Self.append(UInt64(archive.count),to:&auxiliary); auxiliary.append(archive)
@@ -114,6 +128,22 @@ final class AccessibilitySession {
     let id=nextID()
     try send(id:id,value:selector,args:args)
     return id
+  }
+
+  private func request(_ selector: String, args: [Any] = [], channel: UInt32 = 0) throws -> Any {
+    let id=nextID()
+    condition.lock(); waitingID=id; rpcResult=nil; condition.unlock()
+    try send(id:id,channel:channel,reply:true,value:selector,args:args)
+    return try wait(seconds:8,ax:false)
+  }
+
+  /// Instruments uses the same DTX framing, without activating accessibility.
+  func screenshotData() throws -> Data {
+    guard !accessibility else { throw PhoneError("Screenshot requires an Instruments session") }
+    guard let data=try request("takeScreenshot",channel:1) as? Data, !data.isEmpty else {
+      throw PhoneError("Instruments returned no screenshot data")
+    }
+    return data
   }
   private func exact(_ count: Int) throws -> Data {
     guard count>=0 && count<=limit else { throw PhoneError("Oversized accessibility message") }
@@ -181,7 +211,13 @@ final class AccessibilitySession {
           guard auxiliary>=16 else { throw PhoneError("Invalid DTX arguments") }
           var offset=32
           while offset<16+auxiliary {
-            guard try Self.uint(body,offset)==10, try Self.uint(body,offset+4)==2 else { throw PhoneError("Unsupported DTX argument") }
+            guard try Self.uint(body,offset)==10 else { throw PhoneError("Unsupported DTX argument key") }
+            let argumentType=try Self.uint(body,offset+4)
+            if argumentType==3 {
+              args.append(try Self.uint(body,offset+8)); offset+=12
+              continue
+            }
+            guard argumentType==2 else { throw PhoneError("Unsupported DTX argument type \(argumentType)") }
             let size=Int(try Self.uint(body,offset+8)); offset+=12
             guard size<=16+auxiliary-offset else { throw PhoneError("Truncated DTX argument") }
             do { args.append(try Self.unarchive(body.subdata(in:offset..<(offset+size)))) }
@@ -218,7 +254,7 @@ final class AccessibilitySession {
         } else if conversation>0 {
           condition.lock()
           if waitingID==id {
-            if kind==4 { failure=PhoneError("Accessibility service rejected its handshake: \(value)") }
+            if kind==4 { failure=PhoneError("DTX service rejected its request: \(value)") }
             else { rpcResult=value }
             condition.broadcast()
           }

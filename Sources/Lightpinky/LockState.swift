@@ -1,6 +1,18 @@
 import Foundation
 import Darwin
 
+enum LockStateTransportFailure: LocalizedError {
+  case timeout, disconnected
+  case write(String)
+  var errorDescription: String? {
+    switch self {
+    case .timeout: return "Lock-state read timed out"
+    case .disconnected: return "Lock-state service disconnected"
+    case .write(let reason): return "Lock-state write failed: \(reason)"
+    }
+  }
+}
+
 /// Read-only lockdown requests over the existing authenticated CoreDevice
 /// tunnel. No pairing, TLS session, heartbeat or second tunnel is created.
 final class LockStateReader {
@@ -46,24 +58,25 @@ final class LockStateReader {
     data.append(body)
     var timeout = timeval(tv_sec: 3, tv_usec: 0)
     setsockopt(socket.fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
-    try socket.write(contentsOf: data)
+    do { try socket.write(contentsOf: data) }
+    catch { throw LockStateTransportFailure.write(error.localizedDescription) }
   }
 
   private func read(_ count: Int, deadline: Double) throws -> Data {
     var data = Data()
     while data.count < count {
       let remaining = deadline - ProcessInfo.processInfo.systemUptime
-      guard remaining > 0 else { throw PhoneError("Lock-state read timed out") }
+      guard remaining > 0 else { throw LockStateTransportFailure.timeout }
       var ready = pollfd(fd: socket.fileDescriptor, events: Int16(POLLIN), revents: 0)
       let result = poll(&ready, 1, Int32(remaining * 1000))
       if result < 0 && errno == EINTR { continue }
-      guard result > 0 else { throw PhoneError("Lock-state read timed out") }
+      guard result > 0 else { throw LockStateTransportFailure.timeout }
       var chunk = Data(count: min(count - data.count, 16384))
       let received = chunk.withUnsafeMutableBytes {
         Darwin.recv(socket.fileDescriptor, $0.baseAddress, $0.count, 0)
       }
       if received < 0 && errno == EINTR { continue }
-      guard received > 0 else { throw PhoneError("Lock-state service disconnected") }
+      guard received > 0 else { throw LockStateTransportFailure.disconnected }
       chunk.count = received
       data.append(chunk)
     }

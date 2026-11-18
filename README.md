@@ -70,7 +70,7 @@ The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix s
 
 The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired devices; a `Phone` exposes native `power()` state and `screenshot()` as a `CGImage`. `Server.respond(_:)` accepts JSON-RPC data, including `tools/list` for discovering the full control interface. The same implementation backs the executable and embedded callers.
 
-Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery and screenshots still use Apple's `devicectl`; repeated state checks reuse native connections.
+Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; state checks and Instruments screenshots use native connections. A failed state read or screenshot transport reconnects once; this does not repeat input.
 
 ### Install the agent skill
 
