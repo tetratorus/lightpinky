@@ -134,6 +134,9 @@ public final class Phone {
     let deadline = ProcessInfo.processInfo.systemUptime + wait
     while true {
       if let image = video.frame(maxAge: maxAge) {
+        if ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" {
+          FileHandle.standardError.write(Data("video: \(video.stats)\n".utf8))
+        }
         // The encoder pads the picture to a block multiple on the right and
         // bottom. Crop to the panel so coordinates match screenshots.
         let size = try videoSize()
@@ -159,7 +162,7 @@ public final class Phone {
     return image
   }
 
-  static func jpeg(_ image: CGImage, maxSize: Int) throws -> ([String: Any], String) {
+  static func jpeg(_ image: CGImage, maxSize: Int, lossless: Bool = false) throws -> ([String: Any], String) {
     let factor = maxSize > 0 ? max(1, Int(ceil(Double(max(image.width, image.height)) / Double(maxSize)))) : 1
     var scaled = image
     if factor > 1 {
@@ -170,12 +173,13 @@ public final class Phone {
       scaled = context.makeImage()!
     }
     let data = NSMutableData()
-    guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+    let type = lossless ? UTType.png : UTType.jpeg
+    guard let dest = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil) else {
       throw PhoneError("Cannot encode screenshot")
     }
     CGImageDestinationAddImage(dest, scaled, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
-    guard CGImageDestinationFinalize(dest) else { throw PhoneError("JPEG encoding failed") }
-    return (["type": "image", "mimeType": "image/jpeg", "data": (data as Data).base64EncodedString()],
+    guard CGImageDestinationFinalize(dest) else { throw PhoneError("Image encoding failed") }
+    return (["type": "image", "mimeType": lossless ? "image/png" : "image/jpeg", "data": (data as Data).base64EncodedString()],
       "image \(scaled.width)x\(scaled.height) of a \(image.width)x\(image.height) screen; multiply image coordinates by \(factor) for tap and swipe")
   }
 

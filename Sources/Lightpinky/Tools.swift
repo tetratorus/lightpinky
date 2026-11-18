@@ -11,7 +11,7 @@ final class Tools {
     "power": "Read lock and display state; wake:true explicitly wakes the screen.",
     "unlock": "Wake and unlock using IPHONE_UNLOCK_CODE from the server environment. Never retries passcode input.",
     "lock": "Lock the iPhone with one side-button press and verify locked state. Already locked and asleep is a no-op.",
-    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor. video:true takes the frame from the display video stream instead of a full PNG transfer.",
+    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor. video:true takes the frame from the display video stream instead of a full PNG transfer. png:true returns lossless PNG instead of JPEG.",
     "elements": "Read the foreground application's native accessibility tree. json:true returns the full structure.",
     "tap": "Tap or long-press in screenshot pixels, or find an element by label or identifier. Use role or zero-based index to disambiguate.",
     "swipe": "Swipe between screenshot pixel coordinates.",
@@ -35,7 +35,7 @@ final class Tools {
       if ["tap","swipe","type","key","launch","stop_app","open_link"].contains(name) { field("no_settle","boolean") }
       switch name {
       case "power": field("wake","boolean")
-      case "screenshot": field("max_size","integer"); field("video","boolean")
+      case "screenshot": field("max_size","integer"); field("video","boolean"); field("png","boolean")
       case "elements": field("json","boolean")
       case "tap":
         field("x","number"); field("y","number"); field("long_press","boolean")
@@ -128,7 +128,7 @@ final class Tools {
         shot = try phone.videoFrame(wait:5)
         if shot == nil { throw PhoneError("No current frame from the display video stream") }
       }
-      let (image,note) = try Phone.jpeg(shot ?? phone.screenshot(),maxSize:Int(size))
+      let (image,note) = try Phone.jpeg(shot ?? phone.screenshot(),maxSize:Int(size),lossless:args["png"] as? Bool == true)
       return ["content":[image,["type":"text","text":note]]]
     case "elements":
       let screen=try phone.elements()

@@ -38,17 +38,18 @@ final class Media {
       let display = try connection.displayInfo()
       let displays = display["displays"] as? [[String:Any]] ?? []
       let displayID = (displays.first(where: { $0["primary"] as? Bool == true })?["displayId"] as? NSNumber)?.int64Value ?? 1
+      let options: [String:Any] = [
+        "AVCMediaStreamNegotiatorAccessNetworkType":["int":Int64(1)],
+        "AVCMediaStreamNegotiatorTransportProtocolType":["int":Int64(2)],
+        "CoreDeviceVideoDisplayMode":["string":"DisplayByID"],
+        "VideoStreamForDisplayID":["int":displayID],
+        "avcMediaStreamOptionClientSessionID":["uuid":UUID()],
+      ]
       let response = try connection.invoke(service,feature:"com.apple.coredevice.feature.startmediastream",
         action:"com.apple.coredevice.action.mediastreamstart",input:[
           "clientSupportedFeatures":UInt64(140),"direction":"output","type":"video",
           "negotiatorOffer":try Self.offer(),
-          "options":[
-            "AVCMediaStreamNegotiatorAccessNetworkType":["int":Int64(1)],
-            "AVCMediaStreamNegotiatorTransportProtocolType":["int":Int64(2)],
-            "CoreDeviceVideoDisplayMode":["string":"DisplayByID"],
-            "VideoStreamForDisplayID":["int":displayID],
-            "avcMediaStreamOptionClientSessionID":["uuid":UUID()],
-          ],
+          "options":options,
           "receiverIP":String(cString:host),"receiverPort":UInt64(port),
           "senderIP":peer,"timeout":UInt64(10),
         ])

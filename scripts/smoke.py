@@ -241,7 +241,7 @@ def run(binary, operations):
                 response = client.call("tools/call", {"name": name, "arguments": arguments})
                 for content in response.get("result", {}).get("content", []):
                     if content["type"] == "image":
-                        with tempfile.NamedTemporaryFile(prefix="lightpinky-", suffix=".jpg", delete=False) as image:
+                        with tempfile.NamedTemporaryFile(prefix="lightpinky-", suffix=".png" if content.get("mimeType") == "image/png" else ".jpg", delete=False) as image:
                             image.write(base64.b64decode(content["data"]))
                         print(name, "->", image.name, flush=True)
                     elif content["type"] == "text":

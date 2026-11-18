@@ -22,7 +22,9 @@ final class VideoDecoder {
   private var packetAt: Double = 0
   /// When the picture was last known to be free of gaps.
   private var intactAt = ProcessInfo.processInfo.systemUptime
-  private var packets = 0, frames = 0, gaps = 0, keys = 0
+  private var packets = 0, frames = 0, gaps = 0, keys = 0, bytes = 0
+  private var firstKey = ""
+  private let createdAt = ProcessInfo.processInfo.systemUptime
   private static let trailer = Data([0x04,0xf0,0x0a,0xc0,0,0,0x03,0,0,0x04,0xec,0x0a,0xb0,0x03])
 
   deinit { if let session { VTDecompressionSessionInvalidate(session) } }
@@ -64,6 +66,7 @@ final class VideoDecoder {
     let sequence = UInt16(packet[2]) << 8 | UInt16(packet[3])
     lock.lock(); defer { lock.unlock() }
     packets += 1
+    bytes += packet.count
     packetAt = ProcessInfo.processInfo.systemUptime
     if let lastSequence, sequence != lastSequence &+ 1 {
       // Never stitch across a gap: VideoToolbox renders partial pictures
@@ -165,12 +168,17 @@ final class VideoDecoder {
     decodedAt = ProcessInfo.processInfo.systemUptime
     if key || !needKey { intactAt = decodedAt }
     frames += 1
-    if key { keys += 1; needKey = false }
+    if key {
+      keys += 1; needKey = false
+      if firstKey.isEmpty {
+        firstKey = String(format: "first key after %.2fs, %d packets, %d bytes", decodedAt - createdAt, packets, bytes)
+      }
+    }
   }
 
   var stats: String {
     lock.lock(); defer { lock.unlock() }
     let size = latest.map { "\(CVPixelBufferGetWidth($0))x\(CVPixelBufferGetHeight($0))" } ?? "none"
-    return "packets \(packets) frames \(frames) keys \(keys) gaps \(gaps) waitingForKey \(needKey) size \(size)"
+    return "packets \(packets) frames \(frames) keys \(keys) gaps \(gaps) waitingForKey \(needKey) size \(size) bytes \(bytes); \(firstKey)"
   }
 }
