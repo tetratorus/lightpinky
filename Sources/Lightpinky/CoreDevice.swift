@@ -31,10 +31,10 @@ private struct CoreStorage {
 @_silgen_name("$s10CoreDevice21UsageAssertionOptionsV20requiredPreparednessAcA0bG0V_tcfC")
 private func coreOptions(_ preparedness: UnsafeRawPointer) -> CoreStorage
 
-struct PhoneError: LocalizedError {
+public struct PhoneError: LocalizedError {
   let message: String
-  init(_ message: String) { self.message = message }
-  var errorDescription: String? { message }
+  public init(_ message: String) { self.message = message }
+  public var errorDescription: String? { message }
 }
 
 final class CoreConnection {

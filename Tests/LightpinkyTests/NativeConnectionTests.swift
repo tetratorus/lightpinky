@@ -1,6 +1,6 @@
 import XCTest
 import Darwin
-@testable import Lightpinky
+@testable import LightpinkyCore
 
 final class LockStateTests: XCTestCase {
   private func frame(_ value: [String: Any]) throws -> Data {

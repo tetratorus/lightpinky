@@ -1,5 +1,5 @@
 import Foundation
-import AppleBridge
+import LightpinkyCore
 
 umask(0o077)
 signal(SIGPIPE, SIG_IGN)
@@ -30,7 +30,7 @@ DispatchQueue.global().async {
     let server = Server()
     if let socketPath { try server.socket(path:socketPath,idle:idle) }
     else { server.stdio() }
-    server.tools.shutdown()
+    server.shutdown()
     exit(0)
   } catch {
     fputs("\(error.localizedDescription)\n", stderr)

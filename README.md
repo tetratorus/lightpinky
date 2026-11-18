@@ -66,6 +66,12 @@ Run `./lightpinky` as a stdio MCP server in any client. Pass `IPHONE_UNLOCK_CODE
 
 The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix socket. The parent directory must belong to the current user with mode 700; the server verifies each client's Unix identity.
 
+### Embed in a Swift application
+
+The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired devices; a `Phone` exposes native `power()` state and `screenshot()` as a `CGImage`. `Server.respond(_:)` accepts JSON-RPC data, including `tools/list` for discovering the full control interface. The same implementation backs the executable and embedded callers.
+
+Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery and screenshots still use Apple's `devicectl`; repeated state checks reuse native connections.
+
 ### Install the agent skill
 
 The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/lightpinky-iphone/SKILL.md). Copy it to `~/.config/devin/skills/lightpinky-iphone/SKILL.md` for global use. It points agents back to this repository and these setup instructions; no machine-specific paths or phone IDs are embedded.

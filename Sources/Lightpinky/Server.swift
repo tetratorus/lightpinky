@@ -1,10 +1,12 @@
 import Foundation
 import Darwin
 
-final class Server {
+public final class Server {
   let tools = Tools()
+  public init() {}
+  public func shutdown() { tools.shutdown() }
 
-  func respond(_ data: Data) -> Data? {
+  public func respond(_ data: Data) -> Data? {
     var id: Any = NSNull()
     func encode(_ body: [String: Any]) -> Data? { try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) }
     do {
@@ -38,7 +40,7 @@ final class Server {
     }
   }
 
-  func stdio() {
+  public func stdio() {
     while let line = readLine() {
       autoreleasepool {
         if let response = respond(Data(line.utf8)) {
@@ -48,7 +50,7 @@ final class Server {
     }
   }
 
-  func socket(path: String, idle: Double) throws {
+  public func socket(path: String, idle: Double) throws {
     guard path.utf8.count < 104 else { throw PhoneError("Unix socket path is too long") }
     let directory = URL(fileURLWithPath:path).deletingLastPathComponent()
     let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)

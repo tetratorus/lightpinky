@@ -3,17 +3,17 @@ import ImageIO
 import UniformTypeIdentifiers
 import AppleBridge
 
-struct PhoneInfo {
-  let id: String
-  let udid: String
-  let name: String
-  let transport: String
+public struct PhoneInfo {
+  public let id: String
+  public let udid: String
+  public let name: String
+  public let transport: String
   var json: [String: Any] {
     ["id": udid, "coredevice_id": id, "name": name, "platform": "ios",
      "backend": "coredevice", "connection": transport, "state": "paired", "virtual": false]
   }
 
-  static func discover() throws -> [PhoneInfo] {
+  public static func discover() throws -> [PhoneInfo] {
     let result = try Command.device(["list", "devices"])
     return (result["devices"] as? [[String: Any]] ?? []).compactMap { entry in
       let hardware = entry["hardwareProperties"] as? [String: Any] ?? [:]
@@ -29,13 +29,13 @@ struct PhoneInfo {
   }
 }
 
-final class Phone {
-  let info: PhoneInfo
+public final class Phone {
+  public let info: PhoneInfo
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
   private var axSession: AccessibilitySession?
   private var lockStateReader: LockStateReader?
-  init(_ info: PhoneInfo) { self.info = info }
+  public init(_ info: PhoneInfo) { self.info = info }
   deinit { axSession?.close() }
 
   private func nativeConnection() throws -> CoreConnection {
@@ -80,7 +80,7 @@ final class Phone {
     return display
   }
 
-  func power() throws -> [String: Any] {
+  public func power() throws -> [String: Any] {
     let light = try display()["backlightState"] as? String ?? ""
     return ["Locked": try locked(), "ScreenOn": ["on", "activeOn", "activeDimmed"].contains(light)]
   }
@@ -117,7 +117,7 @@ final class Phone {
     guard try power()["ScreenOn"] as? Bool == true else { throw PhoneError("Wake sent but the display stayed off") }
   }
 
-  func screenshot() throws -> CGImage {
+  public func screenshot() throws -> CGImage {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lightpinky-shot-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                            attributes: [.posixPermissions: 0o700])
