@@ -10,6 +10,7 @@ final class Media {
   private var reader: DispatchSourceRead?
   private var timer: DispatchSourceTimer?
   private var started = false
+  let video = VideoDecoder()
 
   init(connection: CoreConnection) throws {
     self.connection = connection
@@ -20,9 +21,14 @@ final class Media {
     let queue = DispatchQueue(label:"lightpinky.media")
     let packets = DispatchSource.makeReadSource(fileDescriptor:fd,queue:queue)
     let descriptor = fd
+    let video = video
     packets.setEventHandler {
       var buffer = [UInt8](repeating:0,count:65536)
-      while recv(descriptor,&buffer,buffer.count,0) > 0 {}
+      while true {
+        let count = recv(descriptor,&buffer,buffer.count,0)
+        guard count > 0 else { break }
+        buffer.withUnsafeBytes { video.receive(UnsafeRawBufferPointer(rebasing:$0[..<count])) }
+      }
     }
     packets.setCancelHandler { close(descriptor) }
     packets.resume()
@@ -47,6 +53,9 @@ final class Media {
           "senderIP":peer,"timeout":UInt64(10),
         ])
       started = true
+      if ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" {
+        FileHandle.standardError.write(Data("media start: \(CoreConnection.object(response))\n".utf8))
+      }
       if let channel = xpc_dictionary_get_value(response,"connection"),
          let config = xpc_dictionary_get_value(channel,"streamConfig") {
         let sourcePort = UInt16(truncatingIfNeeded:xpc_dictionary_get_uint64(config,"SourcePort"))
@@ -55,7 +64,11 @@ final class Media {
         for shift in [24,16,8,0] { report.append(UInt8(truncatingIfNeeded:ssrc >> shift)) }
         let feedback = DispatchSource.makeTimerSource(queue:queue)
         feedback.schedule(deadline:.now(),repeating:1)
-        feedback.setEventHandler { LPMediaSend(descriptor,peer,sourcePort,report) }
+        let trace = ProcessInfo.processInfo.environment["LIGHTPINKY_VIDEO_TRACE"] == "1"
+        feedback.setEventHandler {
+          LPMediaSend(descriptor,peer,sourcePort,report)
+          if trace { FileHandle.standardError.write(Data("video: \(video.stats)\n".utf8)) }
+        }
         feedback.resume()
         timer = feedback
       }
@@ -74,11 +87,20 @@ final class Media {
     }
   }
 
-  deinit {
+  /// Ends every display stream on the phone, including another process's.
+  /// Used before locking, where a live session competes with the side button.
+  func stopAll() {
     if started && connection.isValid {
       _ = try? connection.invoke(service,feature:"com.apple.coredevice.feature.stopmediastream",
         action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
     }
+    started = false
+  }
+
+  // The stop request has no per-stream form that this phone accepts, and
+  // the recorder and the controller each hold a stream. Leaving quietly
+  // lets the phone end only this one when its RTCP reports stop arriving.
+  deinit {
     timer?.cancel()
     reader?.cancel()
   }

@@ -11,6 +11,14 @@ final class HID {
   private let universal = "com.apple.coredevice.hid.universalhidservice"
   private let indigo = "com.apple.coredevice.hid.indigo"
 
+  /// Starts the display session if needed and returns its video decoder.
+  func video() throws -> VideoDecoder {
+    if media == nil { media = try Media(connection:connection) }
+    return media!.video
+  }
+
+  func endDisplaySession() { media?.stopAll(); media = nil }
+
   init(connection: CoreConnection) {
     self.connection = connection
   }

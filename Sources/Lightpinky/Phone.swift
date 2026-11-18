@@ -81,6 +81,7 @@ public final class Phone {
     if before["Locked"] as? Bool == true && before["ScreenOn"] as? Bool == false { return }
     // End the developer display/input session before putting the phone to
     // sleep. Keeping it alive can compete with the side-button transition.
+    hidConnection?.endDisplaySession()
     hidConnection = nil
     // Consumer Power is the side button. Send it once, then verify instead
     // of toggling it again if the reply is delayed.
@@ -109,6 +110,43 @@ public final class Phone {
       if try power()["ScreenOn"] as? Bool == true { return }
     } while ProcessInfo.processInfo.systemUptime < deadline
     throw PhoneError("Wake sent once, but the display did not turn on")
+  }
+
+  private var panelSize: (Int, Int)?
+  private func videoSize() throws -> (Int, Int) {
+    if let panelSize { return panelSize }
+    guard let bounds = try display()["bounds"] as? [[Double]], bounds.count == 2, bounds[1].count == 2 else {
+      throw PhoneError("Display size unavailable")
+    }
+    panelSize = (Int(bounds[1][0]), Int(bounds[1][1]))
+    return panelSize!
+  }
+
+  /// A frame from the display video stream, or nil when none is current.
+  /// Starts the developer display session; it sends no input to the phone.
+  public func videoFrame(wait: Double = 0, maxAge: Double = 2) throws -> CGImage? {
+    var video = try hid().video()
+    // A finished stream was ended by another process or lost packets.
+    if video.finished(patience: 2) {
+      hidConnection = nil
+      video = try hid().video()
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + wait
+    while true {
+      if let image = video.frame(maxAge: maxAge) {
+        // The encoder pads the picture to a block multiple on the right and
+        // bottom. Crop to the panel so coordinates match screenshots.
+        let size = try videoSize()
+        let rect = CGRect(x: 0, y: 0, width: min(size.0, image.width), height: min(size.1, image.height))
+        return image.cropping(to: rect) ?? image
+      }
+      if ProcessInfo.processInfo.systemUptime >= deadline { break }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+    if ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" {
+      FileHandle.standardError.write(Data("video: \(video.stats)\n".utf8))
+    }
+    return nil
   }
 
   public func screenshot() throws -> CGImage {

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 final class Tools {
   private var phones: [String: Phone] = [:]
@@ -10,7 +11,7 @@ final class Tools {
     "power": "Read lock and display state; wake:true explicitly wakes the screen.",
     "unlock": "Wake and unlock using IPHONE_UNLOCK_CODE from the server environment. Never retries passcode input.",
     "lock": "Lock the iPhone with one side-button press and verify locked state. Already locked and asleep is a no-op.",
-    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor.",
+    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor. video:true takes the frame from the display video stream instead of a full PNG transfer.",
     "elements": "Read the foreground application's native accessibility tree. json:true returns the full structure.",
     "tap": "Tap or long-press in screenshot pixels, or find an element by label or identifier. Use role or zero-based index to disambiguate.",
     "swipe": "Swipe between screenshot pixel coordinates.",
@@ -34,7 +35,7 @@ final class Tools {
       if ["tap","swipe","type","key","launch","stop_app","open_link"].contains(name) { field("no_settle","boolean") }
       switch name {
       case "power": field("wake","boolean")
-      case "screenshot": field("max_size","integer")
+      case "screenshot": field("max_size","integer"); field("video","boolean")
       case "elements": field("json","boolean")
       case "tap":
         field("x","number"); field("y","number"); field("long_press","boolean")
@@ -122,7 +123,12 @@ final class Tools {
     case "screenshot":
       let size = try number("max_size")
       guard size >= 0 && size <= 10000 else { throw PhoneError("max_size must be 0-10000") }
-      let (image,note) = try Phone.jpeg(phone.screenshot(),maxSize:Int(size))
+      var shot: CGImage?
+      if args["video"] as? Bool == true {
+        shot = try phone.videoFrame(wait:5)
+        if shot == nil { throw PhoneError("No current frame from the display video stream") }
+      }
+      let (image,note) = try Phone.jpeg(shot ?? phone.screenshot(),maxSize:Int(size))
       return ["content":[image,["type":"text","text":note]]]
     case "elements":
       let screen=try phone.elements()

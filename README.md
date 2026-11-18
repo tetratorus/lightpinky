@@ -70,6 +70,8 @@ The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix s
 
 The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired devices; a `Phone` exposes native `power()` state and `screenshot()` as a `CGImage`. `Server.respond(_:)` accepts JSON-RPC data, including `tools/list` for discovering the full control interface. The same implementation backs the executable and embedded callers.
 
+`videoFrame()` starts the phone's display video stream (RTP/HEVC, decoded with VideoToolbox) and returns its newest frame cropped to the panel, or `nil` when no intact frame is current; fall back to `screenshot()` then. The stream costs far less bandwidth than repeated PNG screenshots, and iOS refuses to start it during a phone or VoIP call. Each process holds its own stream; only `lock` ends every stream on the phone.
+
 Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; `power()` and `screenshot()` use CoreDevice requests only and never read the phone's service directory, so a polling embedder does not disturb macOS's connection.
 
 ### Install the agent skill
@@ -84,7 +86,7 @@ The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/l
 | `download_disk_image` | Prepare developer services supplied by Xcode |
 | `unlock` | Wake and unlock using the server's `IPHONE_UNLOCK_CODE`, including over Wi-Fi |
 | `lock` | Send the side button once and verify a stable locked state with the display off; already locked and asleep is a no-op |
-| `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by |
+| `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by. `video:true` takes the frame from the display video stream instead of transferring a full PNG |
 | `elements` | App in front, lock/keyboard state, then one line per element: role, label, id, center `@x,y`, bounds, states. `json` returns the full structure |
 | `tap` | Tap or long-press `x`, `y`, or match `find` with optional `role` and zero-based `index` |
 | `swipe` | Swipe `x1,y1` → `x2,y2` over `duration_ms` |
