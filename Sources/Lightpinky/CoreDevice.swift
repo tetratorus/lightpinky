@@ -234,14 +234,14 @@ final class CoreConnection {
     try? FileManager.default.removeItem(at:portCache)
   }
 
-  func request(_ service: String, _ dictionary: [String: Any]) throws -> xpc_object_t {
+  func request(_ service: String, _ dictionary: [String: Any], timeout: Double = 15) throws -> xpc_object_t {
     let semaphore = DispatchSemaphore(value: 0)
     var response: xpc_object_t?
     LPRemoteRequest(try channel(service), Self.xpc(dictionary), queue) {
       response = $0
       semaphore.signal()
     }
-    guard semaphore.wait(timeout: .now() + 8) == .success, let response else {
+    guard semaphore.wait(timeout: .now() + timeout) == .success, let response else {
       invalidate()
       throw PhoneError("CoreDevice service request timed out; input was not retried")
     }
@@ -322,8 +322,9 @@ final class CoreConnection {
     return elements
   }
 
-  func invoke(_ service: String, feature: String, action: String = "", input: [String: Any]) throws -> xpc_object_t {
-    let response = try request(service,invocation(feature:feature,action:action,input:input))
+  func invoke(_ service: String, feature: String, action: String = "", input: [String: Any],
+              timeout: Double = 15) throws -> xpc_object_t {
+    let response = try request(service,invocation(feature:feature,action:action,input:input),timeout:timeout)
     if let output = xpc_dictionary_get_value(response,"CoreDevice.output") { return output }
     if let error = xpc_dictionary_get_value(response,"CoreDevice.error"),
        let info = xpc_dictionary_get_value(error,"userInfo"),
@@ -354,7 +355,10 @@ final class CoreConnection {
     let output=try invoke("com.apple.coredevice.screencaptureservice",
       feature:"com.apple.coredevice.feature.capturescreenshot",
       action:"com.apple.coredevice.action.capturescreenshot",
-      input:["displayUniqueID":NSNull(),"requestedFormat":"png"])
+      input:["displayUniqueID":NSNull(),"requestedFormat":"png"],
+      // A full-resolution PNG is over a megabyte. On a slow Wi-Fi link,
+      // abandoning it early only queues another one behind it.
+      timeout:30)
     guard let image=xpc_dictionary_get_value(output,"image"),
           xpc_get_type(image)==XPC_TYPE_DATA,
           let bytes=xpc_data_get_bytes_ptr(image),xpc_data_get_length(image)>0 else {
