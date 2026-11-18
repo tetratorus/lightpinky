@@ -9,6 +9,7 @@ final class Media {
   private let fd: Int32
   private var reader: DispatchSourceRead?
   private var timer: DispatchSourceTimer?
+  private var feed: DispatchSourceTimer?
   private var started = false
   let video = VideoDecoder()
 
@@ -37,7 +38,21 @@ final class Media {
       let began = ProcessInfo.processInfo.systemUptime
       let display = try connection.displayInfo()
       let displays = display["displays"] as? [[String:Any]] ?? []
-      let displayID = (displays.first(where: { $0["primary"] as? Bool == true })?["displayId"] as? NSNumber)?.int64Value ?? 1
+      let primary = displays.first(where: { $0["primary"] as? Bool == true })
+      let displayID = (primary?["displayId"] as? NSNumber)?.int64Value ?? 1
+      if let bounds = primary?["bounds"] as? [[Double]], bounds.count == 2, bounds[1].count == 2 {
+        // Hand a recorder on this Mac one frame a second, cropped to the
+        // panel like videoFrame(), on a queue that cannot delay packets.
+        let width = Int(bounds[1][0]), height = Int(bounds[1][1])
+        let sender = FrameSender(udid: connection.udid)
+        let share = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "lightpinky.media.feed"))
+        share.schedule(deadline: .now() + 1, repeating: 1)
+        share.setEventHandler { [video] in
+          if let buffer = video.buffer(maxAge: 2) { sender.send(buffer, width: width, height: height) }
+        }
+        share.resume()
+        feed = share
+      }
       let options: [String:Any] = [
         "AVCMediaStreamNegotiatorAccessNetworkType":["int":Int64(1)],
         "AVCMediaStreamNegotiatorTransportProtocolType":["int":Int64(2)],
@@ -83,6 +98,7 @@ final class Media {
           action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
       }
       timer?.cancel()
+      feed?.cancel()
       packets.cancel()
       throw error
     }
@@ -96,6 +112,7 @@ final class Media {
         action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
     }
     started = false
+    feed?.cancel()
   }
 
   // The stop request has no per-stream form that this phone accepts, and
@@ -103,6 +120,7 @@ final class Media {
   // lets the phone end only this one when its RTCP reports stop arriving.
   deinit {
     timer?.cancel()
+    feed?.cancel()
     reader?.cancel()
   }
 

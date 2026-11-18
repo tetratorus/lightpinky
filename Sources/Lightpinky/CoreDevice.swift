@@ -57,7 +57,7 @@ final class CoreConnection {
   }
   let device: CoreObject
   private let identifier: String
-  private let udid: String
+  let udid: String
   private var assertion: CoreObject?
   private let queue = DispatchQueue(label: "lightpinky.coredevice")
   private var channels: [String: AnyObject] = [:]

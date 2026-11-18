@@ -80,10 +80,15 @@ public final class Server {
     }
     guard bound == 0, chmod(path,0o600) == 0, listen(listener,8) == 0 else { throw PhoneError("Cannot bind private Unix socket") }
     var lastRequest = ProcessInfo.processInfo.systemUptime
+    var streaming = false
     while true {
       var ready = pollfd(fd:listener,events:Int16(POLLIN),revents:0)
       let polled = poll(&ready,1,1000)
       if idle > 0 && ProcessInfo.processInfo.systemUptime - lastRequest >= idle { return }
+      if streaming && ProcessInfo.processInfo.systemUptime - lastRequest >= 30 {
+        tools.endDisplaySessions()
+        streaming = false
+      }
       if polled < 0 && errno != EINTR { throw PhoneError("Socket poll failed") }
       if polled <= 0 { continue }
       let client = accept(listener,nil,nil)
@@ -99,6 +104,7 @@ public final class Server {
           guard let body = try readHTTP(client) else { return }
           lastRequest = ProcessInfo.processInfo.systemUptime
           let response = respond(body) ?? Data()
+          streaming = true
           let status = response.isEmpty ? "202 Accepted" : "200 OK"
           let header = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(response.count)\r\nConnection: close\r\n\r\n".utf8)
           try sendAll(client,header + response)

@@ -112,6 +112,12 @@ public final class Phone {
     throw PhoneError("Wake sent once, but the display did not turn on")
   }
 
+  /// Ends the display stream. The next input starts it again.
+  func endDisplaySession() {
+    hidConnection?.endDisplaySession()
+    hidConnection = nil
+  }
+
   private var panelSize: (Int, Int)?
   private func videoSize() throws -> (Int, Int) {
     if let panelSize { return panelSize }

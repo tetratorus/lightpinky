@@ -40,12 +40,13 @@ final class VideoDecoder {
 
   /// The newest decoded frame, if one was decoded within `maxAge` seconds
   /// or packets are still arriving for an intact picture.
+  func buffer(maxAge: Double) -> CVPixelBuffer? {
+    lock.lock(); defer { lock.unlock() }
+    return !needKey && ProcessInfo.processInfo.systemUptime - decodedAt <= maxAge ? latest : nil
+  }
+
   func frame(maxAge: Double) -> CGImage? {
-    lock.lock()
-    let now = ProcessInfo.processInfo.systemUptime
-    let buffer = !needKey && now - decodedAt <= maxAge ? latest : nil
-    lock.unlock()
-    guard let buffer else { return nil }
+    guard let buffer = buffer(maxAge: maxAge) else { return nil }
     var image: CGImage?
     VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
     return image

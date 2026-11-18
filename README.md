@@ -44,7 +44,7 @@ Explicit wake/unlock opens the paired developer connection and uses the system p
 
 `scripts/phone` accepts any tool from `tools`, with arguments as `tool=JSON`. It prints complete text results, saves screenshots to temporary files and prints their paths, and exits nonzero on a failed tool instead of continuing. It builds the binary automatically if missing.
 
-Calls share a background server and its device connections. It listens on a private Unix socket under `~/.cache/lightpinky/run/`, restarts when the binary changes, and exits after 15 minutes without calls (`LIGHTPINKY_IDLE=5m` changes that). `scripts/phone stop` ends it; `LIGHTPINKY_DAEMON=0` runs a fresh server for one invocation. `LIGHTPINKY_DEVICE=<UDID>` supplies the default device.
+Calls share a background server and its device connections. The server ends the phone's display stream after 30 seconds without a call; the next input starts it again. It listens on a private Unix socket under `~/.cache/lightpinky/run/`, restarts when the binary changes, and exits after 15 minutes without calls (`LIGHTPINKY_IDLE=5m` changes that). `scripts/phone stop` ends it; `LIGHTPINKY_DAEMON=0` runs a fresh server for one invocation. `LIGHTPINKY_DEVICE=<UDID>` supplies the default device.
 
 The default phone selection is retained within a server session, avoiding repeated discovery for each command. Calling `devices` refreshes discovery and clears that selection if more than one phone is present. CoreDevice invalidations and service failures discard cached connections before the next operation; input is never replayed automatically.
 
@@ -71,6 +71,8 @@ The bundled client also uses `-socket PATH -idle 15m` to serve MCP over a Unix s
 The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired devices; a `Phone` exposes native `power()` state and `screenshot()` as a `CGImage`. `Server.respond(_:)` accepts JSON-RPC data, including `tools/list` for discovering the full control interface. The same implementation backs the executable and embedded callers.
 
 `videoFrame()` starts the phone's display video stream (RTP/HEVC, decoded with VideoToolbox) and returns its newest frame cropped to the panel, or `nil` when no intact frame is current; fall back to `screenshot()` then. The stream costs far less bandwidth than repeated PNG screenshots, and iOS refuses to start it during a phone or VoIP call. Each process holds its own stream; only `lock` ends every stream on the phone.
+
+While the controller's display stream is up, it hands one frame a second to a recorder on this Mac through `FrameReceiver` (a private Unix socket the recorder listens on), so the recorder need not pull full screenshots over the link the controller is using. `FrameReceiver.latest(maxAge:)` returns `nil` whenever no controller is streaming. Video frames are not pixel-exact: the phone stretches the picture by two rows and compresses it.
 
 Serialize calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; `power()` and `screenshot()` use CoreDevice requests only and never read the phone's service directory, so a polling embedder does not disturb macOS's connection.
 
