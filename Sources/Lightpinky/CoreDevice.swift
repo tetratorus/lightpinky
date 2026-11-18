@@ -130,10 +130,14 @@ final class CoreConnection {
   func socket(_ service: String) throws -> FileHandle {
     guard isValid else { throw PhoneError("CoreDevice connection ended") }
     for attempt in 0..<2 {
-      let peer=try tunnelAddress()
-      if let port=try discoverServices()[service] {
+      let ports=try discoverServices()
+      let peer=try peerIP ?? tunnelAddress()
+      if let port=ports[service] {
         let fd=LPConnectTCP(peer,port)
-        if fd>=0 { return FileHandle(fileDescriptor:fd,closeOnDealloc:true) }
+        if fd>=0 {
+          directOpened.insert(service)
+          return FileHandle(fileDescriptor:fd,closeOnDealloc:true)
+        }
       } else if attempt==1 {
         throw PhoneError("The phone did not advertise \(service)")
       }
@@ -196,8 +200,64 @@ final class CoreConnection {
     return result
   }
 
+  private var layoutCache: URL {
+    portCache.deletingLastPathComponent().appendingPathComponent("layout-\(udid).json")
+  }
+  private let reference = "com.apple.coredevice.deviceinfo"
+  private var derived = false
+  private var directOpened: Set<String> = []
+
+  private func save(_ object: [String:Any], to url: URL) {
+    try? FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true,
+      attributes:[.posixPermissions:0o700])
+    if let data=try? JSONSerialization.data(withJSONObject:object) {
+      try? data.write(to:url,options:.atomic)
+      chmod(url.path,0o600)
+    }
+  }
+
+  /// The phone gives its services one contiguous block of ports, in the same
+  /// order on every tunnel; only the block's start moves. With the order
+  /// remembered from one directory read, the port of a channel this process
+  /// already holds locates the whole block, and no further read is needed.
+  private func derivePorts() -> [String:UInt16]? {
+    guard let data=try? Data(contentsOf:layoutCache),
+          let offsets=try? JSONSerialization.jsonObject(with:data) as? [String:Int],
+          offsets[reference] == 0, (try? displayInfo()) != nil,
+          let listing=try? Command.run(["-m","tcp","-p","\(getpid())","-L","1","-n"],timeout:5,
+            executable:"/usr/bin/nettop") else { return nil }
+    var seen: [String:Set<Int>] = [:]
+    for line in String(decoding:listing,as:UTF8.self).split(separator:"\n") {
+      let fields=line.split(separator:",",omittingEmptySubsequences:false)
+      guard fields.count>3, fields[2].hasPrefix("utun"), fields[3]=="Established",
+            let range=fields[1].range(of:"<->") else { continue }
+      let endpoint=fields[1][range.upperBound...]
+      guard let dot=endpoint.lastIndex(of:"."), let port=Int(endpoint[endpoint.index(after:dot)...]) else { continue }
+      seen[String(endpoint[..<dot]),default:[]].insert(port)
+    }
+    let held=Set(channels.keys).union(directOpened).union([reference]).compactMap { offsets[$0] }
+    for (peer,ports) in seen where peerIP == nil || peerIP == peer {
+      // Every port this process holds on the tunnel must land on a service
+      // it opened; a start that explains them all is the block's start.
+      for port in ports { for offset in held {
+        let start=port-offset
+        guard ports.allSatisfy({ held.contains($0-start) }) else { continue }
+        let table=offsets.compactMapValues { UInt16(exactly:start+$0) }
+        guard table.count == offsets.count else { continue }
+        peerIP=peer
+        return table
+      } }
+    }
+    return nil
+  }
+
   func discoverServices() throws -> [String:UInt16] {
     if let directServices { return directServices }
+    if let table=derivePorts() {
+      directServices=table
+      derived=true
+      return table
+    }
     let peer = try tunnelAddress()
     if let data=try? Data(contentsOf:portCache),
        let saved=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
@@ -206,6 +266,8 @@ final class CoreConnection {
       if !cached.isEmpty { directServices=cached; return cached }
     }
     guard let port = directoryPort else { throw PhoneError("Service-directory port unavailable") }
+    // Last resort: this read displaces macOS's own directory connection,
+    // and its heartbeat then fails and takes the tunnel down within minutes.
     let handshake=try ServiceDirectory(peer:peer,port:port).read()
     guard let services=handshake["Services"] as? [String:[String:Any]],
           let properties=handshake["Properties"] as? [String:Any],
@@ -217,17 +279,20 @@ final class CoreConnection {
       return port
     }
     directServices=ports
-    let directory=portCache.deletingLastPathComponent()
-    try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,
-      attributes:[.posixPermissions:0o700])
-    if let data=try? JSONSerialization.data(withJSONObject:["peer":peer,"ports":ports.mapValues { Int($0) }]) {
-      try? data.write(to:portCache,options:.atomic)
-      chmod(portCache.path,0o600)
+    derived=false
+    save(["peer":peer,"ports":ports.mapValues { Int($0) }],to:portCache)
+    if let origin=ports[reference] {
+      save(ports.mapValues { Int($0)-Int(origin) },to:layoutCache)
     }
     return ports
   }
 
   func invalidateDirectory() {
+    // A derived table that fails on a live connection means the remembered
+    // order is wrong (an iOS update, say); forget it so the next lookup reads
+    // the directory. A dead connection says nothing about the order.
+    if derived && isValid { try? FileManager.default.removeItem(at:layoutCache) }
+    derived=false
     directServices=nil
     peerIP=nil
     directoryPort=nil
