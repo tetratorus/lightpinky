@@ -5,19 +5,34 @@ final class HID {
   private let connection: CoreConnection
   private var keyboard: UInt64?
   private var media: Media?
+  private var lastStreamUse: Double?
   // Connections can outlive an HID wrapper (notably across unlock attempts).
   // Keep report timestamps monotonic when that wrapper is recreated.
   private static let epoch = ProcessInfo.processInfo.systemUptime
   private let universal = "com.apple.coredevice.hid.universalhidservice"
   private let indigo = "com.apple.coredevice.hid.indigo"
 
-  /// Starts the display session if needed and returns its video decoder.
-  func video() throws -> VideoDecoder {
+  private func ensureStream() throws -> Media {
     if media == nil { media = try Media(connection:connection) }
-    return media!.video
+    lastStreamUse = ProcessInfo.processInfo.systemUptime
+    return media!
   }
 
-  func endDisplaySession() { media?.stopAll(); media = nil }
+  /// Starts the display session if needed and returns its video decoder.
+  func video() throws -> VideoDecoder {
+    try ensureStream().video
+  }
+
+  func endDisplaySession() {
+    media?.stopAll()
+    media = nil
+    lastStreamUse = nil
+  }
+
+  func endIdleDisplaySession(after seconds: Double, now: Double = ProcessInfo.processInfo.systemUptime) {
+    guard let last = lastStreamUse, now - last >= seconds else { return }
+    endDisplaySession()
+  }
 
   init(connection: CoreConnection) {
     self.connection = connection
@@ -48,7 +63,7 @@ final class HID {
   }
 
   private func contact(_ point: CGPoint, down: Bool) throws {
-    if media == nil { media = try Media(connection:connection) }
+    _ = try ensureStream()
     let x = UInt16((min(1, max(0, point.x)) * 65535).rounded())
     let y = UInt16((min(1, max(0, point.y)) * 65535).rounded())
     var data = Data(repeating: 0, count: 58)
@@ -74,9 +89,9 @@ final class HID {
   }
 
   func prepareKeyboard() throws {
-    if media == nil { media = try Media(connection:connection) }
+    _ = try ensureStream()
     if keyboard != nil { return }
-    let id: UInt64 = 0x100002001
+    let id: UInt64 = 0x100002000 + UInt64.random(in: 1...0xfffff)
     let descriptor = Data([
       0x05,0x01,0x09,0x06,0xa1,0x01,0x05,0x07,0x19,0xe0,0x29,0xe7,
       0x15,0x00,0x25,0x01,0x95,0x08,0x75,0x01,0x81,0x02,

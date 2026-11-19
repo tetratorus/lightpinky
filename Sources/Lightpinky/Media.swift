@@ -107,12 +107,14 @@ final class Media {
   /// Ends every display stream on the phone, including another process's.
   /// Used before locking, where a live session competes with the side button.
   func stopAll() {
+    timer?.cancel()
+    feed?.cancel()
+    reader?.cancel()
     if started && connection.isValid {
       _ = try? connection.invoke(service,feature:"com.apple.coredevice.feature.stopmediastream",
         action:"com.apple.coredevice.action.mediastreamstop",input:["stopAll":true])
     }
     started = false
-    feed?.cancel()
   }
 
   // The stop request has no per-stream form that this phone accepts, and

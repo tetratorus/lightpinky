@@ -2,11 +2,32 @@ import Foundation
 import Darwin
 
 public final class Server {
-  let tools = Tools()
-  public init() {}
-  public func shutdown() { tools.shutdown() }
+  private let tools = Tools()
+  private let queue = DispatchQueue(label: "lightpinky.server")
+  private var reaper: DispatchSourceTimer?
+
+  public init() {
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(deadline: .now() + 5, repeating: 5)
+    timer.setEventHandler { [weak self] in self?.tools.endIdleDisplaySessions(after: 30) }
+    timer.resume()
+    reaper = timer
+  }
+
+  deinit { reaper?.cancel() }
+
+  public func shutdown() {
+    queue.sync {
+      tools.endDisplaySessions()
+      tools.shutdown()
+    }
+  }
 
   public func respond(_ data: Data) -> Data? {
+    queue.sync { respondLocked(data) }
+  }
+
+  private func respondLocked(_ data: Data) -> Data? {
     var id: Any = NSNull()
     func encode(_ body: [String: Any]) -> Data? { try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) }
     do {
@@ -80,15 +101,10 @@ public final class Server {
     }
     guard bound == 0, chmod(path,0o600) == 0, listen(listener,8) == 0 else { throw PhoneError("Cannot bind private Unix socket") }
     var lastRequest = ProcessInfo.processInfo.systemUptime
-    var streaming = false
     while true {
       var ready = pollfd(fd:listener,events:Int16(POLLIN),revents:0)
       let polled = poll(&ready,1,1000)
       if idle > 0 && ProcessInfo.processInfo.systemUptime - lastRequest >= idle { return }
-      if streaming && ProcessInfo.processInfo.systemUptime - lastRequest >= 30 {
-        tools.endDisplaySessions()
-        streaming = false
-      }
       if polled < 0 && errno != EINTR { throw PhoneError("Socket poll failed") }
       if polled <= 0 { continue }
       let client = accept(listener,nil,nil)
@@ -104,7 +120,6 @@ public final class Server {
           guard let body = try readHTTP(client) else { return }
           lastRequest = ProcessInfo.processInfo.systemUptime
           let response = respond(body) ?? Data()
-          streaming = true
           let status = response.isEmpty ? "202 Accepted" : "200 OK"
           let header = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(response.count)\r\nConnection: close\r\n\r\n".utf8)
           try sendAll(client,header + response)

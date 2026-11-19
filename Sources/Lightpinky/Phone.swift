@@ -34,6 +34,8 @@ public final class Phone {
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
   private var axSession: DTXSession?
+  private var cachedApps: [[String: Any]]?
+  private var appsAt: Double = 0
   public init(_ info: PhoneInfo) { self.info = info }
   deinit { axSession?.close() }
 
@@ -43,6 +45,8 @@ public final class Phone {
     axSession = nil
     hidConnection = nil
     axConnection = nil
+    cachedApps = nil
+    appsAt = 0
     let connection = try CoreConnection(identifier:info.id, udid:info.udid)
     axConnection = connection
     return connection
@@ -115,7 +119,10 @@ public final class Phone {
   /// Ends the display stream. The next input starts it again.
   func endDisplaySession() {
     hidConnection?.endDisplaySession()
-    hidConnection = nil
+  }
+
+  func endIdleDisplaySession(after seconds: Double) {
+    hidConnection?.endIdleDisplaySession(after: seconds)
   }
 
   private var panelSize: (Int, Int)?
@@ -233,6 +240,7 @@ public final class Phone {
     trace("locked")
     // iOS can end the developer display session when the phone locks.
     // Recreate input services before beginning a new unlock attempt.
+    hidConnection?.endDisplaySession()
     hidConnection = nil
     guard let code = ProcessInfo.processInfo.environment["IPHONE_UNLOCK_CODE"], !code.isEmpty else {
       throw PhoneError("Set IPHONE_UNLOCK_CODE locally in the server environment or ~/.zshrc; never pass it as a tool argument")
@@ -248,10 +256,20 @@ public final class Phone {
     trace("keyboard ready")
     if try !locked() { return }
     try input.keys([0x28])
-    Thread.sleep(forTimeInterval: 0.6)
-    if try !locked() { return }
+    var lastReadError: String?
     func passcodeVisible() throws -> Bool {
-      let screen=try elements(preferPush: true)
+      let screen: Screen
+      do {
+        screen = try elements(preferPush: true)
+      } catch let failure as AccessibilityFailure {
+        lastReadError = failure.localizedDescription
+        return false
+      } catch let failure as PhoneError where failure.localizedDescription == "No foreground accessibility application"
+          || failure.localizedDescription == "Accessibility did not provide screen bounds" {
+        lastReadError = failure.localizedDescription
+        return false
+      }
+      lastReadError = nil
       let labels=screen.elements.compactMap { $0["Label"] as? String }
       if labels.contains(where: {
         let text=$0.lowercased()
@@ -271,22 +289,29 @@ public final class Phone {
       }
       return true
     }
-    var ready = try passcodeVisible()
+    func waitForPasscode(seconds: Double) throws -> Bool {
+      let deadline = ProcessInfo.processInfo.systemUptime + seconds
+      repeat {
+        Thread.sleep(forTimeInterval: 0.4)
+        if try !locked() { return true }
+        if try passcodeVisible() { return true }
+      } while ProcessInfo.processInfo.systemUptime < deadline
+      return false
+    }
+    var ready = try waitForPasscode(seconds: 2.2)
+    if try !locked() { return }
     trace("screen inspected")
     if !ready {
       // Fall back to the lock-screen swipe if Return did not present the pad.
       // Face ID can animate before the numeric pad becomes visible.
       if try !locked() { return }
-      try input.gesture(from: CGPoint(x: 0.5, y: 0.9996), to: CGPoint(x: 0.5, y: 0.5), duration: 0.3)
-      let deadline = ProcessInfo.processInfo.systemUptime + 8
-      repeat {
-        Thread.sleep(forTimeInterval:0.5)
-        if try !locked() { return }
-        ready = try passcodeVisible()
-      } while !ready && ProcessInfo.processInfo.systemUptime < deadline
+      try input.gesture(from: CGPoint(x: 0.5, y: 0.96), to: CGPoint(x: 0.5, y: 0.45), duration: 0.3)
+      ready = try waitForPasscode(seconds: 8)
+      if try !locked() { return }
     }
     guard ready else {
-      throw PhoneError("System passcode entry screen was not confirmed; no code was entered")
+      let note = lastReadError.map { " (last screen read: \($0))" } ?? ""
+      throw PhoneError("System passcode entry screen was not confirmed\(note); no code was entered")
     }
     trace("passcode screen confirmed")
     try input.prepareKeyboard()
@@ -302,16 +327,25 @@ public final class Phone {
       }
       trace("input complete")
       if code.count != 4 && code.count != 6, try locked() { try input.keys([0x28]) }
-      for _ in 0..<8 {
-        Thread.sleep(forTimeInterval: 0.3)
-        if try !locked() { trace("unlocked"); return }
-      }
     } catch {
       if entered > 0 {
         throw PhoneError("Passcode entry interrupted after \(entered) of \(code.count) digits (\(error.localizedDescription)); no retry was made")
       }
       throw error
     }
+    let unlockDeadline = ProcessInfo.processInfo.systemUptime + 5
+    var reconnected = false
+    repeat {
+      Thread.sleep(forTimeInterval: 0.3)
+      do {
+        if try !locked() { trace("unlocked"); return }
+      } catch {
+        // Reconnect once for read-only confirmation; never repeat PIN input.
+        guard !reconnected else { throw error }
+        reconnected = true
+        axConnection = nil
+      }
+    } while ProcessInfo.processInfo.systemUptime < unlockDeadline
     throw PhoneError("One passcode attempt completed, but the phone remains locked. No retry was made.")
   }
 
@@ -334,7 +368,11 @@ public final class Phone {
     let keyboard = try hid()
     try keyboard.prepareKeyboard()
     if !text.isEmpty {
-      _ = try Command.device(["device", "pasteboard", "copy"], id: info.id, input: Data(text.utf8))
+      do {
+        try nativeConnection().setPasteboard(text)
+      } catch {
+        _ = try Command.device(["device", "pasteboard", "copy"], id: info.id, input: Data(text.utf8))
+      }
     }
     if !append { try keyboard.keys([0xe3, 0x04]); Thread.sleep(forTimeInterval: 0.1) }
     if !text.isEmpty { try keyboard.keys([0xe3, 0x19]) }
@@ -342,7 +380,9 @@ public final class Phone {
     if submit { Thread.sleep(forTimeInterval: 0.1); try keyboard.keys([0x28]) }
   }
 
-  func apps() throws -> [[String: Any]] {
+  func apps(maxAge: Double = 30) throws -> [[String: Any]] {
+    let now = ProcessInfo.processInfo.systemUptime
+    if let cachedApps, now - appsAt < maxAge { return cachedApps }
     let result = try nativeConnection().stream("com.apple.coredevice.appservice",
       feature:"com.apple.coredevice.feature.streamapplist",input:[
         "includeAppClips":false, "includeRemovableApps":true, "includeHiddenApps":false,
@@ -352,43 +392,62 @@ public final class Phone {
     guard let apps=result as? [[String:Any]] else {
       throw PhoneError("Invalid application catalog")
     }
+    cachedApps = apps
+    appsAt = ProcessInfo.processInfo.systemUptime
     return apps
   }
 
-  func appID(_ name: String) throws -> String {
-    let apps = try apps()
-    let exact = apps.filter { $0["bundleIdentifier"] as? String == name }
+  static func matchApp(_ name: String, in catalog: [[String: Any]]) throws -> [String: Any]? {
+    let exact = catalog.filter { $0["bundleIdentifier"] as? String == name }
     func normalized(_ value:String) -> String {
       let visible=value.unicodeScalars.filter { !$0.properties.isBidiControl && $0.value != 0xfeff }
       return String(String.UnicodeScalarView(visible)).precomposedStringWithCanonicalMapping
         .trimmingCharacters(in:.whitespacesAndNewlines).lowercased()
     }
     let wanted=normalized(name)
-    let matches = exact.isEmpty ? apps.filter {
+    guard !wanted.isEmpty else { return nil }
+    let matches = exact.isEmpty ? catalog.filter {
+      if let id = $0["bundleIdentifier"] as? String, id.lowercased() == wanted { return true }
       guard let displayName=$0["name"] as? String else { return false }
       return normalized(displayName)==wanted
     } : exact
-    guard matches.count == 1, let id = matches[0]["bundleIdentifier"] as? String else {
-      throw PhoneError("App name is missing or ambiguous; use a bundle identifier from apps")
+    if matches.isEmpty { return nil }
+    guard matches.count == 1 else {
+      throw PhoneError("App name is ambiguous; use a bundle identifier from apps")
+    }
+    return matches[0]
+  }
+
+  func resolveApp(_ name: String) throws -> [String: Any] {
+    if let found = try Self.matchApp(name, in: try apps(maxAge: 30)) { return found }
+    if ProcessInfo.processInfo.systemUptime - appsAt >= 5,
+       let found = try Self.matchApp(name, in: try apps(maxAge: 0)) { return found }
+    throw PhoneError("App name is missing or ambiguous; use a bundle identifier from apps")
+  }
+
+  func appID(_ name: String) throws -> String {
+    guard let id = try resolveApp(name)["bundleIdentifier"] as? String else {
+      throw PhoneError("App bundle identifier is unavailable")
     }
     return id
   }
 
-  func launchApp(_ name: String) throws {
-    let bundle = try appID(name)
+  private func launchBundle(_ bundle: String, payloadURL: String? = nil) throws {
     // Wire format from go-ios ios/appservice/appservice.go (MIT; see NOTICE).
-    let options = try PropertyListSerialization.data(
+    let platform = try PropertyListSerialization.data(
       fromPropertyList: [String: Any](), format: .binary, options: 0)
+    var options: [String: Any] = [
+      "arguments": [Any](), "environmentVariables": [String: Any](),
+      "platformSpecificOptions": platform,
+      "standardIOUsesPseudoterminals": true, "startStopped": false,
+      "terminateExisting": false, "user": ["active": true],
+      "workingDirectory": NSNull(),
+    ]
+    if let payloadURL { options["payloadURL"] = ["relative": payloadURL] }
     let result = try nativeConnection().invoke("com.apple.coredevice.appservice",
       feature: "com.apple.coredevice.feature.launchapplication", input: [
         "applicationSpecifier": ["bundleIdentifier": ["_0": bundle]],
-        "options": [
-          "arguments": [Any](), "environmentVariables": [String: Any](),
-          "platformSpecificOptions": options,
-          "standardIOUsesPseudoterminals": true, "startStopped": false,
-          "terminateExisting": false, "user": ["active": true],
-          "workingDirectory": NSNull(),
-        ],
+        "options": options,
         "standardIOIdentifiers": [String: Any](),
       ])
     guard let output = CoreConnection.object(result) as? [String: Any],
@@ -398,27 +457,37 @@ public final class Phone {
     }
   }
 
+  func launchApp(_ name: String) throws {
+    try launchBundle(try appID(name))
+  }
+
+  static func canonicalDevicePath(_ raw: String) -> String? {
+    let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : URL(string: raw)
+    guard var path = url?.standardized.path, !path.isEmpty else { return nil }
+    while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+    if path.hasPrefix("/private/") { path.removeFirst("/private".count) }
+    return path
+  }
+
   func stopApp(_ name: String) throws {
-    let id = try appID(name)
-    guard let app = try apps().first(where: { $0["bundleIdentifier"] as? String == id }),
-          let path = app["path"] as? String else {
+    let app = try resolveApp(name)
+    guard let rawBundle = app["path"] as? String,
+          let bundlePath = Self.canonicalDevicePath(rawBundle) else {
       throw PhoneError("The app bundle path is unavailable")
     }
-    func fileURL(_ value: String) -> URL? {
-      value.hasPrefix("/") ? URL(fileURLWithPath:value) : URL(string:value)
-    }
-    guard let bundle=fileURL(path) else { throw PhoneError("Invalid app bundle path") }
     let connection=try nativeConnection()
     let processes=try connection.stream("com.apple.coredevice.appservice",
       feature:"com.apple.coredevice.feature.streamprocesslist",input:[:])
     for case let process as [String:Any] in processes {
       guard let executable = process["executableURL"] as? [String:Any],
-            let relative = executable["relative"] as? String, let path=fileURL(relative),
-            path.deletingLastPathComponent().standardized.path == bundle.standardized.path,
+            let relative = executable["relative"] as? String,
+            let execPath = Self.canonicalDevicePath(relative),
+            let slash = execPath.lastIndex(of: "/"), slash > execPath.startIndex,
+            String(execPath[..<slash]) == bundlePath,
             let pid = process["processIdentifier"] as? NSNumber, pid.intValue > 0 else { continue }
       _ = try connection.invoke("com.apple.coredevice.appservice",
         feature:"com.apple.coredevice.feature.sendsignaltoprocess",input:[
-          "process":["processIdentifier":pid.int64Value], "signal":Int64(SIGTERM),
+          "process":["processIdentifier":pid.int64Value], "signal":Int64(SIGKILL),
         ])
     }
   }
@@ -440,20 +509,41 @@ public final class Phone {
       } catch {
         axSession?.close()
         axSession=nil
-        guard attempt==0, let failure=error as? AccessibilityFailure else { throw error }
-        // An app launch or transition can reject a read (errors 8 and 17
-        // have been seen). Let the screen settle and read once more from the
-        // new foreground app. Only observation is repeated, never input.
-        if case .rejected = failure { Thread.sleep(forTimeInterval: 0.4) }
-        if case .disconnected = failure { axConnection?.invalidateDirectory() }
+        guard attempt==0 else { throw error }
+        if let failure = error as? AccessibilityFailure {
+          // An app launch or transition can reject a read (errors 8 and 17
+          // have been seen). Let the screen settle and read once more from the
+          // new foreground app. Only observation is repeated, never input.
+          if case .rejected = failure { Thread.sleep(forTimeInterval: 0.4) }
+          if case .disconnected = failure { axConnection?.invalidateDirectory() }
+        } else if let failure = error as? PhoneError,
+                  failure.localizedDescription == "No foreground accessibility application"
+                  || failure.localizedDescription == "Accessibility did not provide screen bounds" {
+          Thread.sleep(forTimeInterval: 0.4)
+        } else {
+          throw error
+        }
       }
     }
     throw PhoneError("Accessibility unavailable")
   }
 
+  static func validatedLink(_ raw: String) throws -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty,
+          !trimmed.unicodeScalars.contains(where: { $0.properties.isWhitespace || ($0.value < 0x20 || $0.value == 0x7f) }),
+          let parsed = URL(string: trimmed), let scheme = parsed.scheme?.lowercased(), !scheme.isEmpty else {
+      throw PhoneError("URL requires a valid scheme")
+    }
+    if (scheme == "http" || scheme == "https"), (parsed.host ?? "").isEmpty {
+      throw PhoneError("Web URL requires a host")
+    }
+    return trimmed
+  }
+
   func openURL(_ url: String, app: String? = nil) throws {
-    guard let parsed = URL(string: url), parsed.scheme != nil else { throw PhoneError("URL requires a scheme") }
+    let valid = try Self.validatedLink(url)
     let handler = try app.map { try appID($0) } ?? "com.apple.mobilesafari"
-    _ = try Command.device(["device","process","launch","--payload-url",url,handler],id:info.id)
+    try launchBundle(handler, payloadURL: valid)
   }
 }

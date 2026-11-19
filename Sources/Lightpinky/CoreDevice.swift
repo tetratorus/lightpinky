@@ -64,6 +64,8 @@ final class CoreConnection {
   private var directServices: [String:UInt16]?
   private var peerIP: String?
   private var directoryPort: UInt16?
+  private let pasteboardNonce = "lightpinky-\(UUID().uuidString)"
+  private var pasteboardSequence: Int64 = 0
 
   init(identifier: String, udid: String) throws {
     self.identifier = identifier
@@ -438,6 +440,30 @@ final class CoreConnection {
       throw PhoneError("CoreDevice screenshot returned no image data")
     }
     return Data(bytes:bytes,count:xpc_data_get_length(image))
+  }
+
+  func setPasteboard(_ text: String) throws {
+    pasteboardSequence += 1
+    let utf8 = "public.utf8-plain-text"
+    let response = try request("com.apple.coredevice.pasteboardservice", [
+      "command": "SET",
+      "pasteboardName": "general",
+      "items": [[
+        "types": [utf8],
+        "data": [utf8: ["data": Data(text.utf8)]],
+      ]],
+      // Local-only metadata prevents Universal Clipboard from overwriting the
+      // owner's Mac clipboard when typing on the phone.
+      "sourceMetadata": [
+        "nonce": pasteboardNonce,
+        "pasteboardName": "lightpinky",
+        "changeCount": pasteboardSequence,
+      ],
+    ], timeout: 10)
+    guard let reply = xpc_dictionary_get_string(response, "command"),
+          String(cString: reply) == "SET_REPLY" else {
+      throw PhoneError("Unexpected pasteboard reply")
+    }
   }
 
   static func xpc(_ value: Any) -> xpc_object_t {

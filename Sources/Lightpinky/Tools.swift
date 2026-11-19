@@ -7,7 +7,19 @@ final class Tools {
   func shutdown() { defaultPhone = nil; phones.removeAll() }
   /// The stream makes the phone encode its screen continuously, so it
   /// should not outlive the commands that needed it.
-  func endDisplaySessions() { phones.values.forEach { $0.endDisplaySession() } }
+  func endDisplaySessions() {
+    var seen = Set<ObjectIdentifier>()
+    for phone in phones.values where seen.insert(ObjectIdentifier(phone)).inserted {
+      phone.endDisplaySession()
+    }
+  }
+
+  func endIdleDisplaySessions(after seconds: Double) {
+    var seen = Set<ObjectIdentifier>()
+    for phone in phones.values where seen.insert(ObjectIdentifier(phone)).inserted {
+      phone.endIdleDisplaySession(after: seconds)
+    }
+  }
   static let descriptions: [String: String] = [
     "devices": "List paired iPhones known to macOS CoreDevice.",
     "download_disk_image": "Prepare Apple's developer services using the DDI installed by Xcode.",

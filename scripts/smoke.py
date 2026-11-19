@@ -86,8 +86,10 @@ class SocketClient:
 
 
 def state_dir():
+    os.umask(0o077)
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "lightpinky" / "run"
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache.chmod(0o700)
     return cache
 
 

@@ -17,39 +17,59 @@ struct Screen {
     for data in attributes.dropFirst() {
       let type=data["61"] as? Int ?? 0
       keyboard = keyboard || type==19 || type==20
+      if (data["32"] as? NSNumber)?.boolValue == false { continue }
       guard let frame=data["21"] as? [String:Double] else { continue }
       let x=Int(((frame["x"] ?? 0)*scale).rounded()), y=Int(((frame["y"] ?? 0)*scale).rounded())
       let w=Int(((frame["width"] ?? 0)*scale).rounded()), h=Int(((frame["height"] ?? 0)*scale).rounded())
       guard w>0,h>0,x<width,y<height,x+w>0,y+h>0 else { continue }
       let identifier=data["25"] as? String ?? ""
       let name=(data["33"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
-      let value=(data["64"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        ?? (data["53"] as? String) ?? (data["53"] as? NSNumber)?.stringValue ?? ""
-      let label=name.isEmpty ? value : value.isEmpty || value==name ? name : "\(name), \(value)"
+      let rawValue=((data["64"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        ?? (data["53"] as? String) ?? (data["53"] as? NSNumber)?.stringValue ?? "")
+        .trimmingCharacters(in:.whitespacesAndNewlines)
+      let placeholder=(data["42"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+      let axRole=data["45"] as? Int ?? 0
       let traits=(data["77"] as? NSNumber)?.uint64Value ?? 0
-      let role:String
+      var role:String
       switch type {
-      case 9,10,14,16,17,20,44,54,59,60: role="button"
+      case 9,14,16,17,20,44,54,59,60,75: role="button"
       case 45,49,50,52: role="input"
       case 48: role="text"
       case 43: role="image"
       case 26,32,46: role="list"
       case 40,41: role="switch"
-      case 12: role="checkbox"
+      case 10,12: role="checkbox"
       case 22,80: role="tab"
       case 42: role="link"
       default:
         role=traits & 1 != 0 ? "button" : traits & 2 != 0 ? "link" : traits & 64 != 0 ? "text" : "other"
+        // A first pushed tree lacks AutomationType (61); AXRole (45) carries it.
+        switch axRole {
+        case 3: role="switch"
+        case 15: role="input"
+        case 7 where role=="other": role="image"
+        case 2 where role=="other": role="button"
+        case 6 where role=="other", 14 where role=="other": role="text"
+        default: break
+        }
       }
+      if axRole==9 && (role=="button" || role=="other") { role="tab" }
+      let suppressValue = role=="switch" || role=="checkbox" || (role=="tab" && ["0","1"].contains(rawValue))
+      let value = suppressValue ? "" : rawValue
+      var label = name
+      var detail = value
+      if label.isEmpty { label = detail; detail = "" }
+      if label.isEmpty { label = placeholder }
+      if !detail.isEmpty && detail != label { label += ", \(detail)" }
       guard !label.isEmpty || !identifier.isEmpty || role != "other" else { continue }
       var states:[String]=[]
       if (data["27"] as? NSNumber)?.boolValue == false { states.append("disabled") }
       if (data["28"] as? NSNumber)?.boolValue == true { states.append("focused") }
       if (data["30"] as? NSNumber)?.boolValue == true { states.append("selected") }
       if role=="input" { states.append("editable") }
-      if type==50 { states.append("password") }
+      if type==50 || (role=="input" && traits & (1 << 24) != 0) { states.append("password") }
       if role=="list" { states.append("scrollable") }
-      if ["switch","checkbox"].contains(role), ["1","on"].contains(value.lowercased()) { states.append("checked") }
+      if ["switch","checkbox"].contains(role), ["1","on","开"].contains(rawValue.lowercased()) { states.append("checked") }
       output.append(["Ref":output.count+1,"Role":role,"Label":label,"ID":identifier,
         "Bounds":["X":x,"Y":y,"W":w,"H":h],"States":states,"Source":"tree"])
     }

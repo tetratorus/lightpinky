@@ -41,4 +41,46 @@ final class AccessibilitySnapshotTests: XCTestCase {
     XCTAssertFalse(DTXSession.isReply(["type": 5, "notification": 1], type: 5, object: nil))
     XCTAssertTrue(DTXSession.isReply(["type": 5, "error": 8], type: 5, object: "10:2"))
   }
+
+  func testScreenParsesCellsPlaceholdersSwitchesPushedRolesAndVisibility() throws {
+    let responses: [[String: Any]] = [
+      front,
+      ["type": 5, "result": ["21": ["x": 0.0, "y": 0.0, "width": 402.0, "height": 874.0], "25": "com.apple.Preferences", "33": "Settings"]],
+      // Table cell (75) maps to button; invisible element (32:false) is skipped.
+      ["type": 5, "result": ["21": ["x": 0.0, "y": 100.0, "width": 400.0, "height": 44.0], "33": "General", "61": 75]],
+      ["type": 5, "result": ["21": ["x": 0.0, "y": 150.0, "width": 400.0, "height": 44.0], "33": "Hidden Row", "61": 9, "32": false]],
+      // Empty input falls back to Placeholder (42); switch suppresses 0/1 value in Label.
+      ["type": 5, "result": ["21": ["x": 16.0, "y": 50.0, "width": 370.0, "height": 36.0], "42": "Search for food and places", "61": 45]],
+      ["type": 5, "result": ["21": ["x": 300.0, "y": 200.0, "width": 50.0, "height": 30.0], "33": "Airplane Mode", "53": "1", "61": 40]],
+      // First pushed tree lacks AutomationType (61) and uses AXRole (45).
+      ["type": 5, "result": ["21": ["x": 20.0, "y": 800.0, "width": 80.0, "height": 40.0], "33": "Home", "53": "1", "45": 9]],
+    ]
+    let screen = try Screen(responses: responses, scale: 3, locked: false)
+    XCTAssertEqual(screen.elements.map { $0["Label"] as? String },
+                   ["General", "Search for food and places", "Airplane Mode", "Home"])
+    XCTAssertEqual(screen.elements.map { $0["Role"] as? String },
+                   ["button", "input", "switch", "tab"])
+    XCTAssertEqual(screen.elements[2]["States"] as? [String], ["checked"])
+    let pos = try screen.find("General", role: "button", index: nil)
+    XCTAssertEqual(pos.0, 600, accuracy: 0.5)
+    let search = try screen.find("Search for food", role: "input", index: nil)
+    XCTAssertEqual(search.1, 204, accuracy: 0.5)
+  }
+
+  func testCanonicalDevicePathsAndAppMatchingNormalizePrivatePrefixAndBidiMarks() throws {
+    XCTAssertEqual(Phone.canonicalDevicePath("file:///private/var/containers/Bundle/Application/A/Grab.app/"),
+                   "/var/containers/Bundle/Application/A/Grab.app")
+    XCTAssertEqual(Phone.canonicalDevicePath("/var/containers/Bundle/Application/A/Grab.app/Grab")
+                     .flatMap { p in p.lastIndex(of: "/").map { String(p[..<$0]) } },
+                   "/var/containers/Bundle/Application/A/Grab.app")
+    let catalog: [[String: Any]] = [
+      ["bundleIdentifier": "net.whatsapp.WhatsApp", "name": "\u{200e}WhatsApp"],
+      ["bundleIdentifier": "com.grabtaxi.iphone", "name": "Grab"],
+    ]
+    XCTAssertEqual(try Phone.matchApp("whatsapp", in: catalog)?["bundleIdentifier"] as? String, "net.whatsapp.WhatsApp")
+    XCTAssertEqual(try Phone.matchApp("COM.GRABTAXI.IPHONE", in: catalog)?["bundleIdentifier"] as? String, "com.grabtaxi.iphone")
+    XCTAssertEqual(try Phone.validatedLink(" https://example.com/a "), "https://example.com/a")
+    XCTAssertThrowsError(try Phone.validatedLink("https://"))
+    XCTAssertThrowsError(try Phone.validatedLink("bad link"))
+  }
 }
