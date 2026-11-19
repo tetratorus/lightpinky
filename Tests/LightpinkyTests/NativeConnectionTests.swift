@@ -46,8 +46,9 @@ final class AccessibilitySnapshotTests: XCTestCase {
     let responses: [[String: Any]] = [
       front,
       ["type": 5, "result": ["21": ["x": 0.0, "y": 0.0, "width": 402.0, "height": 874.0], "25": "com.apple.Preferences", "33": "Settings"]],
-      // Table cell (75) maps to button; invisible element (32:false) is skipped.
+      // Table cell (75) maps to button; invisible (32:false) and blank text spacers are skipped.
       ["type": 5, "result": ["21": ["x": 0.0, "y": 100.0, "width": 400.0, "height": 44.0], "33": "General", "61": 75]],
+      ["type": 5, "result": ["21": ["x": 0.0, "y": 130.0, "width": 400.0, "height": 20.0], "61": 48]],
       ["type": 5, "result": ["21": ["x": 0.0, "y": 150.0, "width": 400.0, "height": 44.0], "33": "Hidden Row", "61": 9, "32": false]],
       // Empty input falls back to Placeholder (42); switch suppresses 0/1 value in Label.
       ["type": 5, "result": ["21": ["x": 16.0, "y": 50.0, "width": 370.0, "height": 36.0], "42": "Search for food and places", "61": 45]],

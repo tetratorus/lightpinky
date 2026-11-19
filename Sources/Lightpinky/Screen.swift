@@ -61,7 +61,7 @@ struct Screen {
       if label.isEmpty { label = detail; detail = "" }
       if label.isEmpty { label = placeholder }
       if !detail.isEmpty && detail != label { label += ", \(detail)" }
-      guard !label.isEmpty || !identifier.isEmpty || role != "other" else { continue }
+      guard !label.isEmpty || !identifier.isEmpty || !["other","text"].contains(role) else { continue }
       var states:[String]=[]
       if (data["27"] as? NSNumber)?.boolValue == false { states.append("disabled") }
       if (data["28"] as? NSNumber)?.boolValue == true { states.append("focused") }
