@@ -117,9 +117,8 @@ final class Media {
     started = false
   }
 
-  // The stop request has no per-stream form that this phone accepts, and
-  // the recorder and the controller each hold a stream. Leaving quietly
-  // lets the phone end only this one when its RTCP reports stop arriving.
+  // Explicit display-session cleanup calls stopAll(). On connection loss,
+  // release local resources and let the phone expire missing RTCP reports.
   deinit {
     timer?.cancel()
     feed?.cancel()
