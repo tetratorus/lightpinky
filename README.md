@@ -88,7 +88,7 @@ The portable skill is [.devin/skills/lightpinky-iphone/SKILL.md](.devin/skills/l
 | `download_disk_image` | Prepare developer services supplied by Xcode |
 | `unlock` | Wake and unlock using the server's `IPHONE_UNLOCK_CODE`, including over Wi-Fi |
 | `lock` | Send the side button once and verify a stable locked state with the display off; already locked and asleep is a no-op |
-| `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by. `video:true` takes the frame from the display video stream instead of transferring a full PNG |
+| `screenshot` | JPEG of the screen; tap/swipe coordinates are in its pixels. `max_size` shrinks it and says what to multiply image coordinates by. While the display is on, the frame comes from the display video stream: fast on slow Wi-Fi, but compressed and up to 2 pixels off vertically. `video:false` or `png:true` transfers an exact full-size PNG instead; `video:true` fails rather than fall back |
 | `elements` | App in front, lock/keyboard state, then one line per element: role, label, id, center `@x,y`, bounds, states. `json` returns the full structure |
 | `tap` | Tap or long-press `x`, `y`, or match `find` with optional `role` and zero-based `index` |
 | `swipe` | Swipe `x1,y1` → `x2,y2` over `duration_ms` |

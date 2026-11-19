@@ -14,7 +14,7 @@ final class Tools {
     "power": "Read lock and display state; wake:true explicitly wakes the screen.",
     "unlock": "Wake and unlock using IPHONE_UNLOCK_CODE from the server environment. Never retries passcode input.",
     "lock": "Lock the iPhone with one side-button press and verify locked state. Already locked and asleep is a no-op.",
-    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor. video:true takes the frame from the display video stream instead of a full PNG transfer. png:true returns lossless PNG instead of JPEG.",
+    "screenshot": "JPEG screenshot. Coordinates use full screen pixels; max_size returns a scale factor. While the display is on, the frame comes from the display video stream, which is fast on slow Wi-Fi but compressed and up to 2 pixels off vertically. video:false or png:true transfers an exact full-size PNG instead (png:true also returns it as PNG); video:true fails rather than fall back.",
     "elements": "Read the foreground application's native accessibility tree. json:true returns the full structure.",
     "tap": "Tap or long-press in screenshot pixels, or find an element by label or identifier. Use role or zero-based index to disambiguate.",
     "swipe": "Swipe between screenshot pixel coordinates.",
@@ -126,12 +126,18 @@ final class Tools {
     case "screenshot":
       let size = try number("max_size")
       guard size >= 0 && size <= 10000 else { throw PhoneError("max_size must be 0-10000") }
+      let lossless = args["png"] as? Bool == true
       var shot: CGImage?
       if args["video"] as? Bool == true {
         shot = try phone.videoFrame(wait:5)
         if shot == nil { throw PhoneError("No current frame from the display video stream") }
+      } else if args["video"] == nil, !lossless, (try? phone.power())?["ScreenOn"] as? Bool == true {
+        // A full PNG is megabytes and can take ten seconds on slow Wi-Fi; a
+        // video frame is a few kilobytes. The result is a JPEG either way.
+        // The stream wakes the display, so it is not started for a dark one.
+        shot = try? phone.videoFrame(wait:3)
       }
-      let (image,note) = try Phone.jpeg(shot ?? phone.screenshot(),maxSize:Int(size),lossless:args["png"] as? Bool == true)
+      let (image,note) = try Phone.jpeg(shot ?? phone.screenshot(),maxSize:Int(size),lossless:lossless)
       return ["content":[image,["type":"text","text":note]]]
     case "elements":
       let screen=try phone.elements()
