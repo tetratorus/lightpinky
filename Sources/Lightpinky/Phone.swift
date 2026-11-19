@@ -431,18 +431,20 @@ public final class Phone {
         let connection = try nativeConnection()
         if axSession == nil {
           let socket = try connection.socket("com.apple.accessibility.axAuditDaemon.remoteAXService")
-          // A saved port that no longer answers as accessibility is stale.
+          // A port that does not answer as accessibility is stale.
           do { axSession = try DTXSession(socket:socket) }
           catch { connection.invalidateDirectory(); throw error }
+          connection.confirmDirectory()
         }
         return try Screen(responses:axSession!.tree(preferPush: preferPush),scale:display()["scale"] as? Double ?? 3,locked:locked())
       } catch {
         axSession?.close()
         axSession=nil
         guard attempt==0, let failure=error as? AccessibilityFailure else { throw error }
-        // A foreground app transition can invalidate an AX object (error 8).
-        // Restart observation from the new foreground app, never replay input.
-        if case .rejected(let code) = failure, code != 8 { throw error }
+        // An app launch or transition can reject a read (errors 8 and 17
+        // have been seen). Let the screen settle and read once more from the
+        // new foreground app. Only observation is repeated, never input.
+        if case .rejected = failure { Thread.sleep(forTimeInterval: 0.4) }
         if case .disconnected = failure { axConnection?.invalidateDirectory() }
       }
     }

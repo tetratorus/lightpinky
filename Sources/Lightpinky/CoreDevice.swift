@@ -205,6 +205,9 @@ final class CoreConnection {
   }
   private let reference = "com.apple.coredevice.deviceinfo"
   private var derived = false
+  private static var strikes = 0
+  /// A port from the table answered as the service it was looked up for.
+  func confirmDirectory() { Self.strikes = 0 }
   private var directOpened: Set<String> = []
 
   private func save(_ object: [String:Any], to url: URL) {
@@ -291,7 +294,12 @@ final class CoreConnection {
     // A derived table that fails on a live connection means the remembered
     // order is wrong (an iOS update, say); forget it so the next lookup reads
     // the directory. A dead connection says nothing about the order.
-    if derived && isValid { try? FileManager.default.removeItem(at:layoutCache) }
+    // One failure can be a tunnel that died a moment ago, so it takes two
+    // in a row before paying for a directory read.
+    if derived && isValid {
+      Self.strikes += 1
+      if Self.strikes >= 2 { try? FileManager.default.removeItem(at:layoutCache); Self.strikes = 0 }
+    }
     derived=false
     directServices=nil
     peerIP=nil
