@@ -330,6 +330,8 @@ final class DTXSession {
   }
 
   func tree(preferPush: Bool = false) throws -> [[String:Any]] {
+    let began = ProcessInfo.processInfo.systemUptime
+    defer { NativeTiming.record("accessibility tree", since: began) }
     let front=try request(4)
     guard let app=front["result"] as? [String:Any], app["id"] != nil else { throw PhoneError("No foreground accessibility application") }
     if preferPush {

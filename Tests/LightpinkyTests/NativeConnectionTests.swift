@@ -3,6 +3,32 @@ import Darwin
 @testable import LightpinkyCore
 
 final class ConnectionRecoveryTests: XCTestCase {
+  private func keypad(field: String = "Passcode field, 0 of 6 values entered",
+                      focused: Bool = true) -> [[String: Any]] {
+    [["Label": "Enter Passcode"],
+     ["Label": field, "States": focused ? ["focused", "password"] : ["password"]]]
+      + (0...9).map { ["Label": String($0)] }
+  }
+
+  func testKeypadRequiresKnownLockStateFocusAndEveryDigit() throws {
+    XCTAssertEqual(try Phone.unlockReadiness(locked: true, elements: keypad(), codeLength: 6), .passcode)
+    XCTAssertEqual(try Phone.unlockReadiness(locked: false, elements: keypad(), codeLength: 6), .unlocked)
+    XCTAssertEqual(try Phone.unlockReadiness(locked: nil, elements: keypad(), codeLength: 6), .waiting)
+    XCTAssertEqual(try Phone.unlockReadiness(locked: true, elements: keypad(focused: false), codeLength: 6), .waiting)
+    XCTAssertEqual(try Phone.unlockReadiness(locked: true, elements: Array(keypad().dropLast()), codeLength: 6), .waiting)
+  }
+
+  func testKeypadRejectsPartialEntryWrongLengthAndLockout() {
+    for elements in [
+      keypad(field: "Passcode field, 1 of 6 values entered"),
+      keypad(field: "Passcode field, 0 of 4 values entered"),
+      keypad() + [["Label": "iPhone Unavailable"]],
+      keypad() + [["Label": "Try again in 1 minute"]],
+    ] {
+      XCTAssertThrowsError(try Phone.unlockReadiness(locked: true, elements: elements, codeLength: 6))
+    }
+  }
+
   func testObservationRecoversFromOneTransportFailure() throws {
     for failure in [CoreConnectionFailure.timedOut("lock state"), .disconnected("stream")] {
       var calls = 0

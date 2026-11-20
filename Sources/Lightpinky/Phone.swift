@@ -264,67 +264,40 @@ public final class Phone {
     guard code.allSatisfy({ $0.isASCII && $0.isNumber }) else {
       throw PhoneError("This native unlock implementation currently requires a numeric passcode")
     }
-    try wake()
-    trace("awake")
     let input = try hid()
     try input.prepareKeyboard()
     trace("keyboard ready")
     if try !locked() { return }
     try input.keys([0x28])
     var lastReadError: String?
-    func passcodeVisible() throws -> Bool {
+    func passcodeScreen() throws -> UnlockReadiness {
       let screen: Screen
       do {
         screen = try elements(preferPush: true)
       } catch let failure as AccessibilityFailure {
         lastReadError = failure.localizedDescription
-        return false
+        return .waiting
       } catch let failure as PhoneError where failure.localizedDescription == "No foreground accessibility application"
           || failure.localizedDescription == "Accessibility did not provide screen bounds" {
         lastReadError = failure.localizedDescription
-        return false
+        return .waiting
       }
       lastReadError = nil
-      let labels=screen.elements.compactMap { $0["Label"] as? String }
-      if labels.contains(where: {
-        let text=$0.lowercased()
-        return text.hasPrefix("iphone unavailable") || text.hasPrefix("security lockout") || text.contains("try again in")
-      }) {
-        throw PhoneError("Phone is not accepting a passcode; no code was entered")
-      }
-      guard screen.json["Locked"] as? Bool == true,
-            labels.contains(where: { $0=="Enter Passcode" || $0=="Swipe up for Face ID or Enter Passcode" }),
-            let field=screen.elements.first(where: {
-              ($0["Label"] as? String)?.hasPrefix("Passcode field, ") == true &&
-              ($0["States"] as? [String])?.contains("focused") == true
-            }),
-            (0...9).allSatisfy({ labels.contains(String($0)) }) else { return false }
-      guard field["Label"] as? String == "Passcode field, 0 of \(code.count) values entered" else {
-        throw PhoneError("The passcode field is not empty or its length does not match; no code was entered")
-      }
-      return true
+      return try Self.unlockReadiness(locked: screen.json["Locked"] as? Bool,
+                                     elements: screen.elements, codeLength: code.count)
     }
-    func waitForPasscode(seconds: Double) throws -> Bool {
-      let deadline = ProcessInfo.processInfo.systemUptime + seconds
-      repeat {
-        Thread.sleep(forTimeInterval: 0.4)
-        if try !locked() { return true }
-        if try passcodeVisible() { return true }
-      } while ProcessInfo.processInfo.systemUptime < deadline
-      return false
-    }
-    var ready = try waitForPasscode(seconds: 2.2)
-    if try !locked() { return }
-    trace("screen inspected")
-    if !ready {
-      // Fall back to the lock-screen swipe if Return did not present the pad.
-      // Face ID can animate before the numeric pad becomes visible.
-      if try !locked() { return }
-      try input.gesture(from: CGPoint(x: 0.5, y: 0.96), to: CGPoint(x: 0.5, y: 0.45), duration: 0.3)
-      ready = try waitForPasscode(seconds: 8)
-      if try !locked() { return }
-    }
-    guard ready else {
+    // Return presents the keypad; give the transition a single observation
+    // window. Swiping during it can scroll notification history instead.
+    let deadline = ProcessInfo.processInfo.systemUptime + 10
+    var readiness = UnlockReadiness.waiting
+    repeat {
+      Thread.sleep(forTimeInterval: 0.4)
+      // elements() already supplies a live lock-state read. Don't perform a
+      // second round trip before and after the same screen observation.
+      readiness = try passcodeScreen()
+    } while readiness == .waiting && ProcessInfo.processInfo.systemUptime < deadline
+    if readiness == .unlocked { return }
+    guard readiness == .passcode else {
       let note = lastReadError.map { " (last screen read: \($0))" } ?? ""
       throw PhoneError("System passcode entry screen was not confirmed\(note); no code was entered")
     }
@@ -357,6 +330,30 @@ public final class Phone {
       return
     }
     throw PhoneError("One passcode attempt completed, but the phone remains locked. No retry was made.")
+  }
+
+  enum UnlockReadiness { case waiting, unlocked, passcode }
+
+  static func unlockReadiness(locked: Bool?, elements: [[String: Any]],
+                              codeLength: Int) throws -> UnlockReadiness {
+    if locked == false { return .unlocked }
+    guard locked == true else { return .waiting }
+    let labels = elements.compactMap { $0["Label"] as? String }
+    if labels.contains(where: {
+      let text = $0.lowercased()
+      return text.hasPrefix("iphone unavailable") || text.hasPrefix("security lockout") || text.contains("try again in")
+    }) {
+      throw PhoneError("Phone is not accepting a passcode; no code was entered")
+    }
+    guard labels.contains(where: { $0 == "Enter Passcode" || $0 == "Swipe up for Face ID or Enter Passcode" }),
+          let field = elements.first(where: {
+            ($0["Label"] as? String)?.hasPrefix("Passcode field, ") == true &&
+            ($0["States"] as? [String])?.contains("focused") == true
+          }), (0...9).allSatisfy({ labels.contains(String($0)) }) else { return .waiting }
+    guard field["Label"] as? String == "Passcode field, 0 of \(codeLength) values entered" else {
+      throw PhoneError("The passcode field is not empty or its length does not match; no code was entered")
+    }
+    return .passcode
   }
 
   /// Confirmation is observation only; the PIN attempt has already finished.

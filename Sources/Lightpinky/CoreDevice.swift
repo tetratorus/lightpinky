@@ -62,6 +62,16 @@ enum CoreConnectionFailure: LocalizedError {
   }
 }
 
+enum NativeTiming {
+  static func record(_ operation: String, since start: Double) {
+    guard ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" else { return }
+    let elapsed = ProcessInfo.processInfo.systemUptime - start
+    guard elapsed >= 0.01 else { return }
+    // Operation names only: never request values, screen content or PIN input.
+    FileHandle.standardError.write(Data(String(format: "native %.3fs %@\n", elapsed, operation).utf8))
+  }
+}
+
 final class CoreConnection {
   // RemoteXPC reports disconnects on its callback queue. Input is never
   // replayed; the next tool call can create a fresh connection instead.
@@ -124,6 +134,8 @@ final class CoreConnection {
   }
 
   func channel(_ service: String) throws -> AnyObject {
+    let began = ProcessInfo.processInfo.systemUptime
+    defer { NativeTiming.record("connect \(service)", since: began) }
     guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
     if let cached = channels[service] { return cached }
     let semaphore = DispatchSemaphore(value: 0)
@@ -173,6 +185,8 @@ final class CoreConnection {
   }
 
   func tunnelAddress() throws -> String {
+    let began = ProcessInfo.processInfo.systemUptime
+    defer { NativeTiming.record("local tunnel lookup", since: began) }
     guard isValid else { throw PhoneError("CoreDevice connection ended") }
     if let peerIP { return peerIP }
     // Read macOS's local tunnel metadata. devicectl "details" also queries the
@@ -329,6 +343,8 @@ final class CoreConnection {
   }
 
   func request(_ service: String, _ dictionary: [String: Any], timeout: Double = 15) throws -> xpc_object_t {
+    let began = ProcessInfo.processInfo.systemUptime
+    defer { NativeTiming.record(dictionary["CoreDevice.featureIdentifier"] as? String ?? service, since: began) }
     let semaphore = DispatchSemaphore(value: 0)
     var response: xpc_object_t?
     LPRemoteRequest(try channel(service), Self.xpc(dictionary), queue) {
@@ -441,6 +457,8 @@ final class CoreConnection {
   }
 
   func locked() throws -> Bool {
+    let began = ProcessInfo.processInfo.systemUptime
+    defer { NativeTiming.record("lock state", since: began) }
     guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
     let ready=DispatchSemaphore(value:0)
     var result:Result<Bool,Error>?
