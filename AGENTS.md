@@ -2,6 +2,7 @@
 
 - Runtime: `Package.swift` and `Sources/`, built with `swift build -c release` using full Xcode on this Apple silicon Mac. No Go sidecars or downloaded toolchains.
 - Run `swift test -c release` and `python3 -m unittest discover -s scripts -p 'test_*.py'`. Verify behavior on the paired phone; private Apple API changes require live checks.
+- Clean up live checks even on failure: close SSH sessions/apps opened for the check, lock the phone and confirm its screen is off, then stop the controller with `scripts/phone stop`. Keep the passive recorders running. Never repeat PIN input as part of cleanup.
 - `python3 scripts/setup.py` builds and atomically installs the Swift executable. `scripts/phone tools` discovers the current MCP schemas.
 - Lock state, display state and exact screenshots are CoreDevice requests. Touch and keys need the display video stream; the phone allows one per display, it wakes the display, and iOS refuses it during a call. The server ends it after 30 idle seconds.
 - CoreDevice owns pairing, developer services and the Wi-Fi tunnel. Discovery is passive; explicit wake/unlock may open a paired, locked phone.

@@ -2,6 +2,102 @@ import XCTest
 import Darwin
 @testable import LightpinkyCore
 
+final class ReadRecoveryTests: XCTestCase {
+  private final class Counter {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+  }
+
+  func testFastReadDoesNotStartAReplacement() throws {
+    let calls = Counter()
+    XCTAssertFalse(try ReadRecovery<Bool>("test").read {
+      _ = calls.next()
+      return false
+    })
+    XCTAssertEqual(calls.count, 1)
+  }
+
+  func testStalledReadIsCanceledAndReplaced() throws {
+    let calls = Counter(), canceled = expectation(description: "first task canceled")
+    let value = try ReadRecovery<Bool>("test").read(firstTimeout: 0.02, replacementTimeout: 1) {
+      if calls.next() == 1 {
+        return try await withTaskCancellationHandler(operation: {
+          try await Task.sleep(nanoseconds: 10_000_000_000)
+          return true
+        }, onCancel: { canceled.fulfill() })
+      }
+      return false
+    }
+    XCTAssertFalse(value)
+    XCTAssertEqual(calls.count, 2)
+    wait(for: [canceled], timeout: 1)
+  }
+
+  func testLateCanceledReplyCannotSatisfyTheNextObservation() throws {
+    let calls = Counter(), reader = ReadRecovery<Bool>("test")
+    XCTAssertFalse(try reader.read(firstTimeout: 0.02, replacementTimeout: 1) {
+      if calls.next() == 1 {
+        // Deliberately ignores cancellation, like some framework callbacks.
+        return await withCheckedContinuation { continuation in
+          DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { continuation.resume(returning: true) }
+        }
+      }
+      return false
+    })
+    XCTAssertFalse(try reader.read(firstTimeout: 1, replacementTimeout: 1) {
+      await withCheckedContinuation { continuation in
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { continuation.resume(returning: false) }
+      }
+    })
+  }
+
+  func testUncooperativeCallsCannotAccumulateAcrossObservations() {
+    let calls = Counter(), reader = ReadRecovery<Bool>("test")
+    let finished = expectation(description: "abandoned calls eventually finish")
+    finished.expectedFulfillmentCount = 2
+    XCTAssertThrowsError(try reader.read(firstTimeout: 0.02, replacementTimeout: 0.02) {
+      _ = calls.next()
+      return await withCheckedContinuation { continuation in
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+          continuation.resume(returning: true)
+          finished.fulfill()
+        }
+      }
+    })
+    XCTAssertThrowsError(try reader.read {
+      _ = calls.next()
+      return false
+    })
+    XCTAssertEqual(calls.count, 2)
+    wait(for: [finished], timeout: 1)
+    // The slots must become reusable once the framework callbacks finish.
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    var recovered = false
+    repeat {
+      recovered = (try? reader.read { true }) == true
+      if !recovered { Thread.sleep(forTimeInterval: 0.001) }
+    } while !recovered && ProcessInfo.processInfo.systemUptime < deadline
+    XCTAssertTrue(recovered)
+  }
+
+  func testTransportFailureRetriesButDeviceRefusalDoesNot() throws {
+    let calls = Counter()
+    XCTAssertTrue(try ReadRecovery<Bool>("test").read {
+      if calls.next() == 1 { throw CoreConnectionFailure.disconnected("test") }
+      return true
+    })
+    XCTAssertEqual(calls.count, 2)
+    let refused = Counter()
+    XCTAssertThrowsError(try ReadRecovery<Bool>("test").read {
+      _ = refused.next()
+      throw PhoneError("Device refused the request")
+    })
+    XCTAssertEqual(refused.count, 1)
+  }
+}
+
 final class ConnectionRecoveryTests: XCTestCase {
   private func keypad(field: String = "Passcode field, 0 of 6 values entered",
                       focused: Bool = true) -> [[String: Any]] {

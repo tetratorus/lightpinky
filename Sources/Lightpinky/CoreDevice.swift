@@ -73,6 +73,15 @@ enum NativeTiming {
 }
 
 final class CoreConnection {
+  private static let readersLock = NSLock()
+  private static var readers: [String: ReadRecovery<Bool>] = [:]
+  private static func lockReader(_ udid: String) -> ReadRecovery<Bool> {
+    readersLock.lock(); defer { readersLock.unlock() }
+    if let reader = readers[udid] { return reader }
+    let reader = ReadRecovery<Bool>("lock state")
+    readers[udid] = reader
+    return reader
+  }
   // RemoteXPC reports disconnects on its callback queue. Input is never
   // replayed; the next tool call can create a fresh connection instead.
   private let stateLock = NSLock()
@@ -460,20 +469,18 @@ final class CoreConnection {
     let began = ProcessInfo.processInfo.systemUptime
     defer { NativeTiming.record("lock state", since: began) }
     guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
-    let ready=DispatchSemaphore(value:0)
-    var result:Result<Bool,Error>?
     let device = device
-    let task = Task {
-      do { result = .success(try await device.currentLockState().isPasscodeRequired()) }
-      catch { result = .failure(error) }
-      ready.signal()
-    }
-    guard ready.wait(timeout:.now()+20) == .success else {
-      task.cancel()
+    do {
+      let result = try Self.lockReader(udid).read {
+        try await device.currentLockState().isPasscodeRequired()
+      }
+      guard isValid else { throw CoreConnectionFailure.disconnected("connection during lock-state read") }
+      return result
+    } catch {
+      // The next read-only retry reacquires the assertion and channels.
       invalidate()
-      throw CoreConnectionFailure.timedOut("lock state")
+      throw error
     }
-    return try result!.get()
   }
 
   func screenshotData() throws -> Data {

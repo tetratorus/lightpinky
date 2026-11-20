@@ -60,8 +60,9 @@ public final class Phone {
     return hid
   }
 
-  func locked() throws -> Bool {
-    try nativeConnection().locked()
+  func locked(recover: Bool = true) throws -> Bool {
+    if recover { return try CoreConnectionFailure.retryRead { try nativeConnection().locked() } }
+    return try nativeConnection().locked()
   }
 
   func display() throws -> [String: Any] {
@@ -307,7 +308,7 @@ public final class Phone {
     let inputConnection = try nativeConnection()
     let pinInput = try hid()
     try pinInput.prepareKeyboard()
-    // From this point onward, never retry. Check lock state before each key so
+    // From this point onward, never reconnect or replay input. Check lock state before each key so
     // a Face ID unlock cannot spill the rest of the code into the foreground app.
     var entered = 0
     do {
@@ -325,10 +326,7 @@ public final class Phone {
       }
       throw error
     }
-    // A lock-state read during the unlock animation can stall for ~10 seconds.
-    // Let authentication settle before starting read-only confirmation.
-    Thread.sleep(forTimeInterval: 1)
-    if try Self.confirmUnlock(locked: { try self.locked() }, reconnect: { self.axConnection = nil }) {
+    if try Self.confirmUnlock(locked: { try self.locked(recover: false) }, reconnect: { self.axConnection = nil }) {
       trace("unlocked")
       return
     }
@@ -366,7 +364,6 @@ public final class Phone {
     let deadline = now() + 5
     var reconnected = false
     repeat {
-      pause()
       do {
         if try !locked() { return true }
       } catch {
@@ -377,6 +374,7 @@ public final class Phone {
         // the promised confirmation now rather than exiting before the retry.
         if try !locked() { return true }
       }
+      pause()
     } while now() < deadline
     return false
   }
