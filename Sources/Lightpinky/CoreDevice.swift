@@ -43,6 +43,25 @@ public struct PhoneError: LocalizedError {
   public var errorDescription: String? { message }
 }
 
+/// Only transport failures qualify for an observation retry. Device refusals,
+/// malformed results and input operations must propagate without being replayed.
+enum CoreConnectionFailure: LocalizedError {
+  case timedOut(String)
+  case disconnected(String)
+
+  var errorDescription: String? {
+    switch self {
+    case .timedOut(let operation): return "CoreDevice \(operation) timed out"
+    case .disconnected(let operation): return "CoreDevice \(operation) disconnected"
+    }
+  }
+
+  static func retryRead<T>(_ read: () throws -> T) throws -> T {
+    do { return try read() }
+    catch is CoreConnectionFailure { return try read() }
+  }
+}
+
 final class CoreConnection {
   // RemoteXPC reports disconnects on its callback queue. Input is never
   // replayed; the next tool call can create a fresh connection instead.
@@ -105,14 +124,14 @@ final class CoreConnection {
   }
 
   func channel(_ service: String) throws -> AnyObject {
-    guard isValid else { throw PhoneError("CoreDevice connection ended; input was not retried") }
+    guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
     if let cached = channels[service] { return cached }
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<AnyObject, Error>?
     device.connect(service, 0, queue, queue) { value in result = value; semaphore.signal() }
     guard semaphore.wait(timeout: .now() + 10) == .success else {
       invalidate()
-      throw PhoneError("CoreDevice service \(service) timed out")
+      throw CoreConnectionFailure.timedOut("service \(service)")
     }
     let connection = try result!.get()
     LPRemoteActivate(connection) { [weak self] event in
@@ -318,11 +337,11 @@ final class CoreConnection {
     }
     guard semaphore.wait(timeout: .now() + timeout) == .success, let response else {
       invalidate()
-      throw PhoneError("CoreDevice service request timed out; input was not retried")
+      throw CoreConnectionFailure.timedOut("service request")
     }
     if xpc_get_type(response) == XPC_TYPE_ERROR {
       invalidate()
-      throw PhoneError("CoreDevice service disconnected; input was not retried")
+      throw CoreConnectionFailure.disconnected("service request")
     }
     if xpc_dictionary_get_value(response, "error") != nil { throw PhoneError("CoreDevice rejected the service request") }
     return response
@@ -346,12 +365,13 @@ final class CoreConnection {
   /// Current DDIs stream application catalogs; the old listapps request can
   /// wedge dtappserviced. Use an isolated channel for its side-channel pushes.
   func stream(_ service: String, feature: String, input: [String: Any]) throws -> [Any] {
-    guard isValid else { throw PhoneError("CoreDevice connection ended") }
+    guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
     let connected = DispatchSemaphore(value: 0)
     var result: Result<AnyObject, Error>?
     device.connect(service, 0, queue, queue) { value in result=value; connected.signal() }
     guard connected.wait(timeout:.now()+10) == .success else {
-      throw PhoneError("CoreDevice stream connection timed out")
+      invalidate()
+      throw CoreConnectionFailure.timedOut("stream connection")
     }
     let connection = try result!.get()
     defer { LPRemoteCancel(connection) }
@@ -363,7 +383,7 @@ final class CoreConnection {
       condition.lock(); defer { condition.broadcast(); condition.unlock() }
       guard !finished else { return }
       if xpc_get_type(event) == XPC_TYPE_ERROR {
-        failure=PhoneError("CoreDevice stream disconnected"); finished=true; return
+        failure=CoreConnectionFailure.disconnected("stream"); finished=true; return
       }
       guard let body=Self.object(event) as? [String:Any] else { return }
       if let error=body["CoreDevice.error"] {
@@ -391,9 +411,17 @@ final class CoreConnection {
     let deadline=Date(timeIntervalSinceNow:15)
     condition.lock(); defer { condition.unlock() }
     while !finished {
-      if !condition.wait(until:deadline) { throw PhoneError("CoreDevice stream timed out") }
+      if !condition.wait(until:deadline), !finished {
+        // Ignore late batches after canceling this isolated stream.
+        finished = true
+        invalidate()
+        throw CoreConnectionFailure.timedOut("stream")
+      }
     }
-    if let failure { throw failure }
+    if let failure {
+      if failure is CoreConnectionFailure { invalidate() }
+      throw failure
+    }
     return elements
   }
 
@@ -413,15 +441,19 @@ final class CoreConnection {
   }
 
   func locked() throws -> Bool {
+    guard isValid else { throw CoreConnectionFailure.disconnected("connection") }
     let ready=DispatchSemaphore(value:0)
     var result:Result<Bool,Error>?
-    Task {
+    let device = device
+    let task = Task {
       do { result = .success(try await device.currentLockState().isPasscodeRequired()) }
       catch { result = .failure(error) }
       ready.signal()
     }
     guard ready.wait(timeout:.now()+20) == .success else {
-      throw PhoneError("CoreDevice lock state timed out")
+      task.cancel()
+      invalidate()
+      throw CoreConnectionFailure.timedOut("lock state")
     }
     return try result!.get()
   }

@@ -65,7 +65,10 @@ public final class Phone {
   }
 
   func display() throws -> [String: Any] {
-    let result = try nativeConnection().displayInfo()
+    try Self.primaryDisplay(nativeConnection().displayInfo())
+  }
+
+  private static func primaryDisplay(_ result: [String: Any]) throws -> [String: Any] {
     guard let displays = result["displays"] as? [[String: Any]],
           var display = displays.first(where: { $0["primary"] as? Bool == true }) else {
       throw PhoneError("No primary display")
@@ -75,8 +78,20 @@ public final class Phone {
   }
 
   public func power() throws -> [String: Any] {
-    let light = try display()["backlightState"] as? String ?? ""
-    return ["Locked": try locked(), "ScreenOn": ["on", "activeOn", "activeDimmed"].contains(light)]
+    try CoreConnectionFailure.retryRead {
+      // Repeat the whole observation on one connection; don't combine a
+      // display read from an old tunnel with a lock read from its replacement.
+      let connection = try nativeConnection()
+      let light = try Self.primaryDisplay(connection.displayInfo())["backlightState"] as? String ?? ""
+      return ["Locked": try connection.locked(), "ScreenOn": ["on", "activeOn", "activeDimmed"].contains(light)]
+    }
+  }
+
+  private func screenOn() throws -> Bool {
+    try CoreConnectionFailure.retryRead {
+      let light = try display()["backlightState"] as? String ?? ""
+      return ["on", "activeOn", "activeDimmed"].contains(light)
+    }
   }
 
   func lock() throws {
@@ -106,12 +121,12 @@ public final class Phone {
 
   func wake() throws {
     _ = try nativeConnection()
-    if try power()["ScreenOn"] as? Bool == true { return }
+    if try screenOn() { return }
     try hid().button(usage: 0x40)
     let deadline = ProcessInfo.processInfo.systemUptime + 6
     repeat {
       Thread.sleep(forTimeInterval: 0.15)
-      if try power()["ScreenOn"] as? Bool == true { return }
+      if try screenOn() { return }
     } while ProcessInfo.processInfo.systemUptime < deadline
     throw PhoneError("Wake sent once, but the display did not turn on")
   }
@@ -314,39 +329,56 @@ public final class Phone {
       throw PhoneError("System passcode entry screen was not confirmed\(note); no code was entered")
     }
     trace("passcode screen confirmed")
-    try input.prepareKeyboard()
+    // Observation may have re-established the connection while waiting for
+    // the keypad. Bind the entire PIN attempt to the current input connection.
+    let inputConnection = try nativeConnection()
+    let pinInput = try hid()
+    try pinInput.prepareKeyboard()
     // From this point onward, never retry. Check lock state before each key so
     // a Face ID unlock cannot spill the rest of the code into the foreground app.
     var entered = 0
     do {
       for digit in code.utf8 {
-        if try !locked() { return }
-        try input.keys([digit == 48 ? 0x27 : 0x1e + digit - 49])
+        if try !inputConnection.locked() { return }
+        try pinInput.keys([digit == 48 ? 0x27 : 0x1e + digit - 49])
         entered += 1
         Thread.sleep(forTimeInterval: 0.12)
       }
       trace("input complete")
-      if code.count != 4 && code.count != 6, try locked() { try input.keys([0x28]) }
+      if code.count != 4 && code.count != 6, try inputConnection.locked() { try pinInput.keys([0x28]) }
     } catch {
       if entered > 0 {
         throw PhoneError("Passcode entry interrupted after \(entered) of \(code.count) digits (\(error.localizedDescription)); no retry was made")
       }
       throw error
     }
-    let unlockDeadline = ProcessInfo.processInfo.systemUptime + 5
+    if try Self.confirmUnlock(locked: { try self.locked() }, reconnect: { self.axConnection = nil }) {
+      trace("unlocked")
+      return
+    }
+    throw PhoneError("One passcode attempt completed, but the phone remains locked. No retry was made.")
+  }
+
+  /// Confirmation is observation only; the PIN attempt has already finished.
+  static func confirmUnlock(locked: () throws -> Bool, reconnect: () -> Void,
+                            now: () -> Double = { ProcessInfo.processInfo.systemUptime },
+                            pause: () -> Void = { Thread.sleep(forTimeInterval: 0.3) }) throws -> Bool {
+    let deadline = now() + 5
     var reconnected = false
     repeat {
-      Thread.sleep(forTimeInterval: 0.3)
+      pause()
       do {
-        if try !locked() { trace("unlocked"); return }
+        if try !locked() { return true }
       } catch {
-        // Reconnect once for read-only confirmation; never repeat PIN input.
-        guard !reconnected else { throw error }
+        guard !reconnected, error is CoreConnectionFailure else { throw error }
         reconnected = true
-        axConnection = nil
+        reconnect()
+        // A timed-out read can consume the entire polling deadline. Perform
+        // the promised confirmation now rather than exiting before the retry.
+        if try !locked() { return true }
       }
-    } while ProcessInfo.processInfo.systemUptime < unlockDeadline
-    throw PhoneError("One passcode attempt completed, but the phone remains locked. No retry was made.")
+    } while now() < deadline
+    return false
   }
 
   func key(_ key: String) throws {
@@ -381,20 +413,24 @@ public final class Phone {
   }
 
   func apps(maxAge: Double = 30) throws -> [[String: Any]] {
-    let now = ProcessInfo.processInfo.systemUptime
-    if let cachedApps, now - appsAt < maxAge { return cachedApps }
-    let result = try nativeConnection().stream("com.apple.coredevice.appservice",
-      feature:"com.apple.coredevice.feature.streamapplist",input:[
-        "includeAppClips":false, "includeRemovableApps":true, "includeHiddenApps":false,
-        "includeInternalApps":false, "includeDefaultApps":true,
-        "requireContainerAccess":false, "includeAppGroupIdentifiers":false, "includeContainerPaths":false,
-      ])
-    guard let apps=result as? [[String:Any]] else {
-      throw PhoneError("Invalid application catalog")
+    try CoreConnectionFailure.retryRead {
+      // Validate the connection before consulting its catalog cache.
+      let connection = try nativeConnection()
+      let now = ProcessInfo.processInfo.systemUptime
+      if let cachedApps, now - appsAt < maxAge { return cachedApps }
+      let result = try connection.stream("com.apple.coredevice.appservice",
+        feature:"com.apple.coredevice.feature.streamapplist",input:[
+          "includeAppClips":false, "includeRemovableApps":true, "includeHiddenApps":false,
+          "includeInternalApps":false, "includeDefaultApps":true,
+          "requireContainerAccess":false, "includeAppGroupIdentifiers":false, "includeContainerPaths":false,
+        ])
+      guard let apps=result as? [[String:Any]] else {
+        throw PhoneError("Invalid application catalog")
+      }
+      cachedApps = apps
+      appsAt = ProcessInfo.processInfo.systemUptime
+      return apps
     }
-    cachedApps = apps
-    appsAt = ProcessInfo.processInfo.systemUptime
-    return apps
   }
 
   static func matchApp(_ name: String, in catalog: [[String: Any]]) throws -> [String: Any]? {

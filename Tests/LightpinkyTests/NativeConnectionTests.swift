@@ -2,6 +2,79 @@ import XCTest
 import Darwin
 @testable import LightpinkyCore
 
+final class ConnectionRecoveryTests: XCTestCase {
+  func testObservationRecoversFromOneTransportFailure() throws {
+    for failure in [CoreConnectionFailure.timedOut("lock state"), .disconnected("stream")] {
+      var calls = 0
+      let value = try CoreConnectionFailure.retryRead {
+        calls += 1
+        if calls == 1 { throw failure }
+        return ["Locked": true, "ScreenOn": false]
+      }
+      XCTAssertEqual(calls, 2)
+      XCTAssertEqual(value, ["Locked": true, "ScreenOn": false])
+    }
+  }
+
+  func testSecondFailureStopsRatherThanLooping() {
+    var calls = 0
+    XCTAssertThrowsError(try CoreConnectionFailure.retryRead { () -> Bool in
+      calls += 1
+      throw CoreConnectionFailure.timedOut("stream")
+    }) { XCTAssertTrue($0 is CoreConnectionFailure) }
+    XCTAssertEqual(calls, 2)
+  }
+
+  func testDeviceRefusalsAndMalformedResponsesAreNotRetried() {
+    for message in ["CoreDevice rejected the service request", "Invalid application catalog"] {
+      var calls = 0
+      XCTAssertThrowsError(try CoreConnectionFailure.retryRead { () -> Bool in
+        calls += 1
+        throw PhoneError(message)
+      }) { XCTAssertEqual($0.localizedDescription, message) }
+      XCTAssertEqual(calls, 1)
+    }
+  }
+
+  func testSuccessfulObservationRunsOnce() throws {
+    var calls = 0
+    XCTAssertFalse(try CoreConnectionFailure.retryRead { calls += 1; return false })
+    XCTAssertEqual(calls, 1)
+  }
+
+  func testUnlockConfirmationStillReadsAfterTimeoutExhaustsPollingDeadline() throws {
+    var time = 0.0, reads = 0, reconnects = 0
+    XCTAssertTrue(try Phone.confirmUnlock(locked: {
+      reads += 1
+      if reads == 1 {
+        time += 20
+        throw CoreConnectionFailure.timedOut("lock state")
+      }
+      return false
+    }, reconnect: { reconnects += 1 }, now: { time }, pause: { time += 0.3 }))
+    XCTAssertEqual(reads, 2)
+    XCTAssertEqual(reconnects, 1)
+  }
+
+  func testUnlockConfirmationDoesNotReconnectTwice() {
+    var time = 0.0, reads = 0, reconnects = 0
+    XCTAssertThrowsError(try Phone.confirmUnlock(locked: {
+      reads += 1
+      throw CoreConnectionFailure.disconnected("connection")
+    }, reconnect: { reconnects += 1 }, now: { time }, pause: { time += 0.3 }))
+    XCTAssertEqual(reads, 2)
+    XCTAssertEqual(reconnects, 1)
+  }
+
+  func testStillLockedConfirmationExpiresWithoutReconnecting() throws {
+    var time = 0.0, reconnects = 0
+    XCTAssertFalse(try Phone.confirmUnlock(locked: { true }, reconnect: { reconnects += 1 },
+                                          now: { time }, pause: { time += 1 }))
+    XCTAssertEqual(time, 5)
+    XCTAssertEqual(reconnects, 0)
+  }
+}
+
 final class AccessibilitySnapshotTests: XCTestCase {
   private let app: [String: Any] = ["pid": 10, "id": 1]
   private let child: [String: Any] = ["pid": 10, "id": 2]
