@@ -325,6 +325,9 @@ public final class Phone {
       }
       throw error
     }
+    // A lock-state read during the unlock animation can stall for ~10 seconds.
+    // Let authentication settle before starting read-only confirmation.
+    Thread.sleep(forTimeInterval: 1)
     if try Self.confirmUnlock(locked: { try self.locked() }, reconnect: { self.axConnection = nil }) {
       trace("unlocked")
       return
