@@ -346,6 +346,7 @@ final class CoreConnection {
     }
     derived=false
     directServices=nil
+    directOpened.removeAll()
     peerIP=nil
     directoryPort=nil
     try? FileManager.default.removeItem(at:portCache)
