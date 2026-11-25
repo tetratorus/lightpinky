@@ -62,7 +62,7 @@ final class HID {
     for i in 0..<6 { data[offset + i] = UInt8(truncatingIfNeeded: ticks >> (8 * i)) }
   }
 
-  private func contact(_ point: CGPoint, down: Bool) throws {
+  func contact(_ point: CGPoint, down: Bool) throws {
     _ = try ensureStream()
     let x = UInt16((min(1, max(0, point.x)) * 65535).rounded())
     let y = UInt16((min(1, max(0, point.y)) * 65535).rounded())

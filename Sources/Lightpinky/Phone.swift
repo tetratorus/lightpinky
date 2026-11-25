@@ -44,6 +44,7 @@ public final class Phone {
     axSession?.close()
     axSession = nil
     hidConnection = nil
+    activeTouchDisplay = nil
     axConnection = nil
     cachedApps = nil
     appsAt = 0
@@ -95,7 +96,7 @@ public final class Phone {
     }
   }
 
-  func lock() throws {
+  public func lock() throws {
     _ = try nativeConnection()
     let before = try power()
     if before["Locked"] as? Bool == true && before["ScreenOn"] as? Bool == false { return }
@@ -120,7 +121,7 @@ public final class Phone {
     throw PhoneError("Lock button sent once, but the phone did not stay locked with its display off")
   }
 
-  func wake() throws {
+  public func wake() throws {
     _ = try nativeConnection()
     if try screenOn() { return }
     try hid().button(usage: 0x40)
@@ -133,7 +134,8 @@ public final class Phone {
   }
 
   /// Ends the display stream. The next input starts it again.
-  func endDisplaySession() {
+  public func endDisplaySession() {
+    activeTouchDisplay = nil
     hidConnection?.endDisplaySession()
   }
 
@@ -231,14 +233,27 @@ public final class Phone {
     }
   }
 
-  func gesture(x1: Double, y1: Double, x2: Double, y2: Double, duration: Double) throws {
+  private var activeTouchDisplay: [String: Any]?
+  public func touch(x: Double, y: Double, down: Bool) throws {
+    let info: [String: Any]
+    if let active = activeTouchDisplay {
+      info = active
+    } else {
+      info = try display()
+      if down { activeTouchDisplay = info }
+    }
+    if !down { activeTouchDisplay = nil }
+    try hid().contact(panelPoint(x: x, y: y, display: info), down: down)
+  }
+
+  public func gesture(x1: Double, y1: Double, x2: Double, y2: Double, duration: Double) throws {
     guard duration.isFinite, duration > 0, duration <= 10 else { throw PhoneError("Duration must be above 0 and at most 10 seconds") }
     let display = try display()
     try hid().gesture(from: panelPoint(x: x1, y: y1, display: display),
                       to: panelPoint(x: x2, y: y2, display: display), duration: duration)
   }
 
-  func unlock() throws {
+  public func unlock() throws {
     let started = ProcessInfo.processInfo.systemUptime
     func trace(_ stage: String) {
       guard ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" else { return }
@@ -379,7 +394,7 @@ public final class Phone {
     return false
   }
 
-  func key(_ key: String) throws {
+  public func key(_ key: String) throws {
     switch key {
     case "home": try hid().button(usage: 0x40)
     case "back":
@@ -393,7 +408,7 @@ public final class Phone {
     }
   }
 
-  func type(_ text: String, append: Bool, submit: Bool) throws {
+  public func type(_ text: String, append: Bool = true, submit: Bool = false) throws {
     guard try !locked() else { throw PhoneError("Phone is locked; use unlock") }
     let keyboard = try hid()
     try keyboard.prepareKeyboard()
