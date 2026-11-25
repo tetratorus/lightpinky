@@ -76,6 +76,8 @@ The package also exports `LightpinkyCore`. `PhoneInfo.discover()` returns paired
 
 While the controller's display stream is up, it hands one frame a second to a recorder on this Mac through `FrameReceiver` (a private Unix socket the recorder listens on), so the recorder need not pull full screenshots over the link the controller is using. `FrameReceiver.latest(maxAge:)` returns `nil` whenever no controller is streaming. Video frames are not pixel-exact: the phone stretches the picture by two rows and compresses it.
 
+For a mirroring client, `touch(x:y:down:)` streams one finger, `keyChord(_:)` presses raw HID keyboard usages (modifiers included), `orientation()` reports the display rotation (video frames stay in the panel's orientation, coordinates are upright), `pasteboardText()` reads the phone's pasteboard through `devicectl`, and `openURL(_:app:)` opens a link.
+
 Serialize direct `Phone` calls on a worker queue and keep the process's main run loop running: Apple's device services deliver callbacks there. `Server` serializes its own requests and checks for streams idle for 30 seconds every five seconds, in both socket and stdio modes. Direct `Phone.videoFrame()` embedding does not start that timer. Embedding does not start a lightpinky daemon. Discovery uses Apple's `devicectl`; `power()` and `screenshot()` use CoreDevice requests only and never read the phone's service directory.
 
 ### Install the agent skill

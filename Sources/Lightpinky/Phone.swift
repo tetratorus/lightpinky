@@ -408,6 +408,28 @@ public final class Phone {
     }
   }
 
+  /// Presses HID keyboard usages (page 7) together and releases them, as a
+  /// hardware keyboard would. Modifiers 0xe0-0xe7 are established first.
+  public func keyChord(_ usages: [UInt8]) throws {
+    guard !usages.isEmpty, usages.count <= 16, usages.allSatisfy({ $0 < 240 }) else {
+      throw PhoneError("A chord takes 1-16 keyboard usages below 0xf0")
+    }
+    try hid().keys(usages)
+  }
+
+  /// Display orientation as CoreDevice reports it: rot0, rot90, rot180 or rot270.
+  /// Video frames stay in the panel's orientation; screenshot coordinates are upright.
+  public func orientation() throws -> String {
+    try CoreConnectionFailure.retryRead { try display()["currentOrientation"] as? String ?? "rot0" }
+  }
+
+  /// Text on the phone's general pasteboard, or nil when it holds none.
+  public func pasteboardText() throws -> String? {
+    let data = try Command.run(["devicectl", "device", "pasteboard", "paste", "--device", info.id,
+                                "--quiet", "--timeout", "10"], timeout: 15)
+    return data.isEmpty ? nil : String(decoding: data, as: UTF8.self)
+  }
+
   public func type(_ text: String, append: Bool = true, submit: Bool = false) throws {
     guard try !locked() else { throw PhoneError("Phone is locked; use unlock") }
     let keyboard = try hid()
@@ -590,7 +612,7 @@ public final class Phone {
     return trimmed
   }
 
-  func openURL(_ url: String, app: String? = nil) throws {
+  public func openURL(_ url: String, app: String? = nil) throws {
     let valid = try Self.validatedLink(url)
     let handler = try app.map { try appID($0) } ?? "com.apple.mobilesafari"
     try launchBundle(handler, payloadURL: valid)
