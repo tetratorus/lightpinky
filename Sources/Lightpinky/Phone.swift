@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -34,15 +35,45 @@ public final class Phone {
   private var hidConnection: HID?
   private var axConnection: CoreConnection?
   private var axSession: DTXSession?
+  private var axLockFD: Int32 = -1
   private var cachedApps: [[String: Any]]?
   private var appsAt: Double = 0
   public init(_ info: PhoneInfo) { self.info = info }
-  deinit { axSession?.close() }
+  deinit { closeAXSession() }
+
+  private func acquireAXLock(timeout: Double = 15) throws {
+    if axLockFD >= 0 { return }
+    let dir = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".cache/lightpinky/run")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    let path = dir.appendingPathComponent("ax-\(info.udid).lock").path
+    let fd = open(path, O_CREAT | O_RDWR, 0o600)
+    guard fd >= 0 else { return }
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+      if errno != EWOULDBLOCK || ProcessInfo.processInfo.systemUptime >= deadline {
+        Darwin.close(fd)
+        throw PhoneError("Another process is using the iPhone accessibility service")
+      }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+    axLockFD = fd
+  }
+
+  private func closeAXSession() {
+    axSession?.close()
+    axSession = nil
+    if axLockFD >= 0 {
+      _ = flock(axLockFD, LOCK_UN)
+      Darwin.close(axLockFD)
+      axLockFD = -1
+    }
+  }
 
   private func nativeConnection() throws -> CoreConnection {
     if let axConnection, axConnection.isValid { return axConnection }
-    axSession?.close()
-    axSession = nil
+    closeAXSession()
     hidConnection = nil
     activeTouchDisplay = nil
     axConnection = nil
@@ -102,6 +133,7 @@ public final class Phone {
     if before["Locked"] as? Bool == true && before["ScreenOn"] as? Bool == false { return }
     // End the developer display/input session before putting the phone to
     // sleep. Keeping it alive can compete with the side-button transition.
+    closeAXSession()
     hidConnection?.endDisplaySession()
     hidConnection = nil
     // Consumer Power is the side button. Send it once, then verify instead
@@ -136,6 +168,7 @@ public final class Phone {
   /// Ends the display stream. The next input starts it again.
   public func endDisplaySession() {
     activeTouchDisplay = nil
+    closeAXSession()
     hidConnection?.endDisplaySession()
   }
 
@@ -254,6 +287,7 @@ public final class Phone {
   }
 
   public func unlock() throws {
+    defer { closeAXSession() }
     let started = ProcessInfo.processInfo.systemUptime
     func trace(_ stage: String) {
       guard ProcessInfo.processInfo.environment["LIGHTPINKY_TIMING"] == "1" else { return }
@@ -570,6 +604,7 @@ public final class Phone {
       do {
         let connection = try nativeConnection()
         if axSession == nil {
+          try acquireAXLock()
           let socket = try connection.socket("com.apple.accessibility.axAuditDaemon.remoteAXService")
           // A port that does not answer as accessibility is stale.
           do { axSession = try DTXSession(socket:socket) }
@@ -578,8 +613,7 @@ public final class Phone {
         }
         return try Screen(responses:axSession!.tree(preferPush: preferPush),scale:display()["scale"] as? Double ?? 3,locked:locked())
       } catch {
-        axSession?.close()
-        axSession=nil
+        closeAXSession()
         guard attempt==0 else { throw error }
         if let failure = error as? AccessibilityFailure {
           // An app launch or transition can reject a read (errors 8 and 17
